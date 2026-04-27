@@ -103,18 +103,32 @@ else
     print_success "PostgreSQL уже установлен"
 fi
 
-# Python 3.11+ — для FastAPI backend
-if ! command -v python3.11 &> /dev/null && ! python3 --version 2>/dev/null | grep -qE "3\.(1[1-9]|[2-9][0-9])"; then
-    print_info "Установка Python 3.11..."
+# Python 3.11+ — для FastAPI backend.
+# Стратегия: проверяем системный python3 через sys.version_info (надёжнее regex
+# на --version), и если он >= 3.11 — используем его + ставим python3-venv /
+# python3-dev / python3-pip. Так работает Debian 12/13, Ubuntu 22.04+. Только
+# если default python3 слишком старый — fallback на отдельный python3.11
+# (Debian 11 / Ubuntu 20.04 / deadsnakes PPA на Ubuntu).
+apt-get install -y -qq python3 python3-venv python3-dev python3-pip > /dev/null
+if python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
+    PYTHON_BIN="$(command -v python3)"
+    print_success "Python: $($PYTHON_BIN --version)"
+elif command -v python3.11 &> /dev/null; then
+    PYTHON_BIN="python3.11"
+    apt-get install -y -qq python3.11-venv python3.11-dev > /dev/null
+    print_success "Python 3.11 уже установлен, добавлены venv/dev"
+else
+    print_info "Системный python3 < 3.11; пробуем python3.11 (Ubuntu/old Debian)..."
     apt-get install -y -qq software-properties-common > /dev/null
     add-apt-repository -y ppa:deadsnakes/ppa > /dev/null 2>&1 || true
     apt-get update -qq
-    apt-get install -y -qq python3.11 python3.11-venv python3.11-dev > /dev/null
-    PYTHON_BIN="python3.11"
-    print_success "Python 3.11 установлен"
-else
-    PYTHON_BIN="$(command -v python3.11 || command -v python3)"
-    print_success "Python: $($PYTHON_BIN --version)"
+    if apt-get install -y -qq python3.11 python3.11-venv python3.11-dev > /dev/null 2>&1; then
+        PYTHON_BIN="python3.11"
+        print_success "Python 3.11 установлен"
+    else
+        print_error "Не удалось установить Python 3.11+. Установите вручную и перезапустите."
+        exit 1
+    fi
 fi
 
 # Node.js 20+ — для сборки React frontend
