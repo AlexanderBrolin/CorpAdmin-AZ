@@ -211,11 +211,23 @@ async def change_password(
 # Google OAuth endpoints
 # ============================================
 
+@router.get("/config")
+async def auth_config():
+    """
+    Public endpoint: auth feature flags for the login UI.
+    Frontend uses this to hide the 'Sign in with Google' button when OAuth
+    was skipped at install time (.env has GOOGLE_CLIENT_ID=disabled).
+    """
+    return {"google_oauth_enabled": settings.is_google_oauth_configured()}
+
+
 @router.get("/google")
 async def google_login(request: Request):
     """
     Redirect to Google OAuth consent screen.
     """
+    if not settings.is_google_oauth_configured():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Google OAuth is not configured")
     from app.core.oauth import get_google_client
     google = get_google_client()
     redirect_uri = f"{settings.BACKEND_URL}/v1/auth/google/callback"
@@ -232,6 +244,8 @@ async def google_callback(
     Google OAuth callback.
     Auto-creates user on first login if domain matches.
     """
+    if not settings.is_google_oauth_configured():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Google OAuth is not configured")
     from app.core.oauth import get_google_client
     google = get_google_client()
 

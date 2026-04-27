@@ -16,4 +16,7 @@ export const authApi = {
 
   changePassword: (data: ChangePasswordRequest) =>
     api.post('/auth/change-password', data),
+
+  getConfig: () =>
+    api.get<{ google_oauth_enabled: boolean }>('/auth/config'),
 }
