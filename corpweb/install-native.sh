@@ -258,6 +258,9 @@ if [[ "$REUSE_DB" == "true" ]]; then
 else
     print_info "Создание базы данных..."
     su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'\" | grep -q 1 || psql -c \"CREATE USER $DB_USER WITH PASSWORD '$DB_PASSWORD';\"" 2>/dev/null
+    # Sync password — covers the orphaned-user case after a prior failed install
+    # (user exists in PG but no .env, so we generated a fresh password above).
+    su - postgres -c "psql -c \"ALTER USER $DB_USER WITH PASSWORD '$DB_PASSWORD';\"" >/dev/null 2>&1
     su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='$DB_NAME'\" | grep -q 1 || psql -c \"CREATE DATABASE $DB_NAME OWNER $DB_USER;\"" 2>/dev/null
     print_success "БД: $DB_NAME, пользователь: $DB_USER"
 fi
