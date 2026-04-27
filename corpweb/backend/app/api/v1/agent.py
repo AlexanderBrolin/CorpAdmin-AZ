@@ -276,6 +276,22 @@ AGENT_HOSTNAME="{hostname}"
 echo "==> Installing CorpWeb Sync Agent on $AGENT_HOSTNAME"
 echo "==> Control plane: $CONTROL_PLANE_URL"
 
+# Install amneziawg (required for escape ifaces). Idempotent.
+if ! command -v awg-quick >/dev/null 2>&1; then
+    echo "==> Installing amneziawg from Amnezia PPA"
+    apt-get install -y gnupg dirmngr curl
+    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x75C9DD72C799870E310542E24166F2C257290828" \\
+        | gpg --dearmor > /usr/share/keyrings/amnezia-ppa.gpg
+    chmod 644 /usr/share/keyrings/amnezia-ppa.gpg
+    echo "deb [signed-by=/usr/share/keyrings/amnezia-ppa.gpg] https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu noble main" \\
+        > /etc/apt/sources.list.d/amnezia.list
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y amneziawg-dkms amneziawg-tools
+fi
+
+# Ensure escape units start at boot once their .conf files arrive.
+systemctl enable awg-quick@az_escape awg-quick@vpn_escape 2>/dev/null || true
+
 # Install Python requests if missing
 python3 -c "import requests" 2>/dev/null || pip3 install requests
 

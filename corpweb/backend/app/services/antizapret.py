@@ -67,6 +67,12 @@ STRING_SETTINGS = [
 ALL_KNOWN_SETTINGS = BOOLEAN_SETTINGS + NUMERIC_BOOLEAN_SETTINGS + STRING_SETTINGS
 
 
+def _load_default_setup() -> bytes:
+    """Load the packaged default setup template. Lazy — called from bootstrap."""
+    from importlib.resources import files
+    return files("app.services").joinpath("antizapret_default_setup.txt").read_bytes()
+
+
 class AntizapretServiceError(Exception):
     pass
 
@@ -75,6 +81,18 @@ class AntizapretService:
 
     def __init__(self, db: Session):
         self._store = WgBlobStore(db)
+
+    def bootstrap_blob_store(self) -> None:
+        """
+        Seed default setup + empty config files into blob store if missing.
+        Idempotent — never overwrites an existing blob.
+        """
+        if self._store.get(ANTIZAPRET_SETUP_FILE) is None:
+            self._store.put(ANTIZAPRET_SETUP_FILE, _load_default_setup(), by="bootstrap")
+            logger.info("Seeded default %s into blob store", ANTIZAPRET_SETUP_FILE)
+        for path in EDITABLE_FILES.values():
+            if self._store.get(path) is None:
+                self._store.put(path, b"", by="bootstrap")
 
     def get_file_content(self, file_type: str) -> str:
         """Read one of the editable config files from the blob store."""
