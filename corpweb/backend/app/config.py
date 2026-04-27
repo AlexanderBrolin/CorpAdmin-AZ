@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
-    # Google OAuth
-    GOOGLE_CLIENT_ID: str
-    GOOGLE_CLIENT_SECRET: str
-    GOOGLE_OAUTH_DOMAIN: str
+    # Google OAuth (optional — install-native.sh writes "disabled" sentinel when skipped)
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_OAUTH_DOMAIN: str = ""
 
     # URLs
     FRONTEND_URL: str
@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # Monitoring
     MONITORING_UPDATE_INTERVAL: int = 30  # seconds
     OPENVPN_STATUS_LOG_DIR: str = "/etc/openvpn/server/logs"
+
+    def is_google_oauth_configured(self) -> bool:
+        return bool(self.GOOGLE_CLIENT_ID) and self.GOOGLE_CLIENT_ID != "disabled"
 
     def get_cors_origins(self) -> list[str]:
         """Parse CORS origins from comma-separated string"""

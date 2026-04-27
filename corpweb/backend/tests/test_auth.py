@@ -100,3 +100,48 @@ class TestLogout:
     def test_logout(self, client, admin_user, admin_token):
         response = client.post("/api/v1/auth/logout", headers=auth_header(admin_token))
         assert response.status_code == 200
+
+
+class TestAuthConfig:
+    """GET /api/v1/auth/config — public endpoint exposing auth feature flags."""
+
+    def test_config_endpoint_is_public(self, client):
+        response = client.get("/api/v1/auth/config")
+        assert response.status_code == 200
+
+    def test_google_oauth_enabled_when_client_id_configured(self, client):
+        # conftest sets GOOGLE_CLIENT_ID="test-client-id" → enabled
+        response = client.get("/api/v1/auth/config")
+        assert response.json() == {"google_oauth_enabled": True}
+
+    def test_google_oauth_disabled_when_client_id_is_disabled_sentinel(
+        self, client, monkeypatch
+    ):
+        from app.config import settings
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "disabled")
+        response = client.get("/api/v1/auth/config")
+        assert response.json() == {"google_oauth_enabled": False}
+
+    def test_google_oauth_disabled_when_client_id_empty(
+        self, client, monkeypatch
+    ):
+        from app.config import settings
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "")
+        response = client.get("/api/v1/auth/config")
+        assert response.json() == {"google_oauth_enabled": False}
+
+
+class TestGoogleOAuthGuards:
+    """When OAuth is not configured, /google* routes must 404 instead of crashing."""
+
+    def test_google_login_returns_404_when_disabled(self, client, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "disabled")
+        response = client.get("/api/v1/auth/google", follow_redirects=False)
+        assert response.status_code == 404
+
+    def test_google_callback_returns_404_when_disabled(self, client, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "disabled")
+        response = client.get("/api/v1/auth/google/callback", follow_redirects=False)
+        assert response.status_code == 404
