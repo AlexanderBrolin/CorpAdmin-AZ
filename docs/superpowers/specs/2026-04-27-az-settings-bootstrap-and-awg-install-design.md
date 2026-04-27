@@ -59,13 +59,14 @@ ERROR  systemctl start awg-quick@az_escape.service failed (rc=5):
 
 #### New file: `corpweb/backend/app/services/antizapret_default_setup.txt`
 
-The 43-line shell-style key=value file that mirrors what upstream AntiZapret writes to `/root/antizapret/setup` on a fresh node. Built from the file currently present on `node-bb01` (43 lines, captured 2026-04-27), with **all deployment-specific values reset to empty** so the file is generic:
+The 44-line shell-style key=value file that mirrors what upstream AntiZapret writes to `/root/antizapret/setup` on a fresh node. Built from the file currently present on `node-bb01` (43 lines, captured 2026-04-27), with **all deployment-specific values reset to empty** so the file is generic:
 
 - `SETUP_DATE=` (empty — this is a bootstrap, not a real install)
 - `WIREGUARD_HOST=` (empty — admin must set per deployment via UI)
 - `OPENVPN_HOST=` (empty)
 - `DEFAULT_INTERFACE=`, `DEFAULT_IP=`, `ANTIZAPRET_OUT_INTERFACE=`, `ANTIZAPRET_OUT_IP=`, `VPN_OUT_INTERFACE=`, `VPN_OUT_IP=`, `CLIENT_IP=`, `FAKE_IP=` — all empty (antizapret scripts auto-derive at runtime when blank)
 - All boolean / numeric keys carry **upstream antizapret defaults**: `ROUTE_ALL=n`, `BLOCK_ADS=y`, `ANTIZAPRET_DNS=1`, `VPN_DNS=1`, `WIREGUARD_BACKUP=y`, `SSH_PROTECTION=y`, `ATTACK_PROTECTION=y`, `TORRENT_GUARD=y`, `RESTRICT_FORWARD=y`, `CLIENT_ISOLATION=y`, `DISCORD_INCLUDE=y`, `CLOUDFLARE_INCLUDE=y`, `TELEGRAM_INCLUDE=y`, `WHATSAPP_INCLUDE=y`, `ROBLOX_INCLUDE=y`, `CLEAR_HOSTS=y`; the rest empty as they ship from upstream.
+- `WARP_OUTBOUND=` is included as an empty string. The original 43-line capture from `node-bb01` did not have this key (because the upstream install on that node did not yet support WARP_OUTBOUND), but the bootstrap contract requires every key in `ALL_KNOWN_SETTINGS` to be present in the seeded blob (asserted by `test_bootstrap_seeds_setup_when_blob_empty`), so the line is added to bring the data file in line with the schema. Final file is 44 lines.
 
 The file is shipped as a **package data resource**, loaded via `importlib.resources.files("app.services").joinpath("antizapret_default_setup.txt").read_bytes()` (so it works under both editable install and `pip install`). The exact bytes (including trailing newline) are committed to git.
 
@@ -150,7 +151,7 @@ systemctl enable awg-quick@az_escape awg-quick@vpn_escape 2>/dev/null || true
 
 Five tests against an in-memory SQLite session (re-uses existing test fixture style from `test_antizapret_blob.py`):
 
-1. **`test_bootstrap_seeds_setup_when_blob_empty`** — empty store → `bootstrap_blob_store()` → `store.get(ANTIZAPRET_SETUP_FILE)` returns the 43-line default; parsed via `service.get_settings()` returns non-None for every key in `ALL_KNOWN_SETTINGS`.
+1. **`test_bootstrap_seeds_setup_when_blob_empty`** — empty store → `bootstrap_blob_store()` → `store.get(ANTIZAPRET_SETUP_FILE)` returns the 44-line default; parsed via `service.get_settings()` returns non-None for every key in `ALL_KNOWN_SETTINGS`.
 2. **`test_bootstrap_seeds_empty_config_files`** — empty store → bootstrap → for every path in `EDITABLE_FILES.values()`, `store.get(path)` returns `b""`.
 3. **`test_bootstrap_idempotent_preserves_existing_setup`** — pre-write `setup` with custom bytes via `store.put(...)` → bootstrap → blob still equals the pre-written bytes (NOT the default).
 4. **`test_bootstrap_idempotent_preserves_existing_config`** — pre-write one editable file with non-empty content → bootstrap → unchanged.
