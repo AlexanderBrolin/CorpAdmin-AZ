@@ -44,6 +44,14 @@ async def lifespan(app: FastAPI):
                 "vpn_manager.bootstrap on startup failed (non-fatal): %s", exc
             )
 
+        try:
+            from app.services.antizapret import AntizapretService
+            AntizapretService(db).bootstrap_blob_store()
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "antizapret bootstrap on startup failed (non-fatal): %s", exc
+            )
+
         # Self-heal iptables after code upgrades that extend DEFAULT_PORTS
         # (e.g. WireGuard backup ports 540/580, escape ports 500/53443).
         # No-op on fresh install.

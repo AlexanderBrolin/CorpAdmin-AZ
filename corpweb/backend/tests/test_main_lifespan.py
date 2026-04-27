@@ -73,3 +73,41 @@ class TestLifespanBootstrap:
         assert called["reconcile"], (
             "ensure_ports_reconciled must still run when bootstrap raises"
         )
+
+    def test_antizapret_bootstrap_called_on_startup(self, db):
+        """lifespan must call AntizapretService.bootstrap_blob_store after vpn_manager.bootstrap."""
+        with patch(
+            "app.services.vpn_manager_new.vpn_manager.bootstrap"
+        ), patch(
+            "app.services.balancer.ensure_ports_reconciled"
+        ), patch(
+            "app.services.antizapret.AntizapretService.bootstrap_blob_store"
+        ) as m_az_boot:
+            with TestClient(app):
+                pass
+            assert m_az_boot.called, (
+                "lifespan must call AntizapretService.bootstrap_blob_store"
+            )
+
+    def test_antizapret_bootstrap_failure_does_not_block_reconcile(self, db):
+        """If antizapret bootstrap raises, ensure_ports_reconciled still runs."""
+        called: dict[str, bool] = {"reconcile": False}
+
+        def _reconcile(_db):
+            called["reconcile"] = True
+
+        with patch(
+            "app.services.vpn_manager_new.vpn_manager.bootstrap"
+        ), patch(
+            "app.services.balancer.ensure_ports_reconciled",
+            side_effect=_reconcile,
+        ), patch(
+            "app.services.antizapret.AntizapretService.bootstrap_blob_store",
+            side_effect=RuntimeError("boom"),
+        ):
+            with TestClient(app):
+                pass
+
+        assert called["reconcile"], (
+            "ensure_ports_reconciled must still run when antizapret bootstrap raises"
+        )
