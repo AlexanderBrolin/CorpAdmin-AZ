@@ -3,6 +3,7 @@ Tests for AntizapretService.bootstrap_blob_store() — seeds default setup +
 empty config files into wg_file_state on a fresh CP and remains idempotent
 across restarts.
 """
+from app.db.models import Node
 from app.services.antizapret import (
     AntizapretService,
     EDITABLE_FILES,
@@ -59,3 +60,34 @@ def test_patch_settings_works_after_bootstrap(db):
     changed = svc.update_settings({"BLOCK_ADS": "n"})
     assert changed == 1
     assert svc.get_settings()["BLOCK_ADS"] == "n"
+
+
+def test_bootstrap_skips_setup_when_active_node_registered(db):
+    db.add(Node(hostname="node-a", private_ip="10.0.0.1", enroll_token="t1", health="ok"))
+    db.commit()
+
+    AntizapretService(db).bootstrap_blob_store()
+
+    store = WgBlobStore(db)
+    assert store.get(ANTIZAPRET_SETUP_FILE) is None
+    assert store.get("/root/antizapret/config/include-hosts.txt") == b""
+
+
+def test_bootstrap_skips_setup_when_degraded_node_registered(db):
+    db.add(Node(hostname="node-b", private_ip="10.0.0.2", enroll_token="t2", health="degraded"))
+    db.commit()
+
+    AntizapretService(db).bootstrap_blob_store()
+
+    assert WgBlobStore(db).get(ANTIZAPRET_SETUP_FILE) is None
+
+
+def test_bootstrap_writes_setup_when_only_unknown_node(db):
+    db.add(Node(hostname="node-c", private_ip="10.0.0.3", enroll_token="t3", health="unknown"))
+    db.commit()
+
+    AntizapretService(db).bootstrap_blob_store()
+
+    seeded = WgBlobStore(db).get(ANTIZAPRET_SETUP_FILE)
+    assert seeded is not None
+    assert b"WIREGUARD_HOST=" in seeded
