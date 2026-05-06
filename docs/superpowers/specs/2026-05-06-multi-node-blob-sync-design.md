@@ -324,8 +324,8 @@ def _has_registered_active_node(self) -> bool:
 
 ## Migration impact
 
-- **bb.azfi.ru (главный target):** на первом restart агента (через ~30 сек или systemctl restart) blob `antizapret:allowed_ips` заполняется автоматом. Скачивание `.conf` для существующего vpn-az клиента (10.29.8.6/32) сразу возвращает корректный `AllowedIPs` (никаких ручных операций над БД).
-- **wgfi2.p4i.ru:** при первом restart агента (после deploy) текущий 8083-байтный stale blob будет перезаписан значением из текущего template на ноде (которое отражает реальный set `*_INCLUDE` в setup + актуальный upstream-baseline). Клиенты, скачавшие свежие `.conf`, увидят набор подсетей, который совпадает с тем, что нода реально обслуживает. Влияние на трафик нейтральное: «лишние» route'ы из stale blob'а и так не работали (нода их не routed). На уже скачанных клиентских .conf изменений нет — пока юзер не перескачает, у него остаётся старое.
+- **bb.azfi.ru (test stack — единственный verification target):** на первом restart агента (через ~30 сек или `systemctl restart`) blob `antizapret:allowed_ips` заполняется автоматом. Скачивание `.conf` для существующего vpn-az клиента (10.29.8.6/32) сразу возвращает корректный `AllowedIPs` (никаких ручных операций над БД).
+- **wgfi2.p4i.ru — production, не trogaем при verification.** Stale blob на wgfi2 упомянут выше только как diagnostic baseline; этот PR не предусматривает migration-verification на wgfi2 и не запускает там агентский код. Если/когда оператор отдельным согласованным деплоем накатит агентский код на wgfi2, поведение будет тем же, что и на bb (следующий `startup_reconcile` push'ит свежий template-blob, освежая stale-снимок) — но это решение и его timing остаются за оператором, не входят в acceptance этого PR.
 - **Свежие установки CP без нод:** ведут себя как сейчас — bootstrap пишет default, admin заполняет через UI, нода добавится позже.
 
 ## Acceptance criteria
