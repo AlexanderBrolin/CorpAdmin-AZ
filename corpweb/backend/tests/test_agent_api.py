@@ -222,6 +222,36 @@ class TestAgentSeedBlob:
         assert resp.status_code == 400
         assert WgBlobStore(db).get("/etc/passwd") is None
 
+    def test_seed_blob_rejects_request_without_auth(self, client, db):
+        resp = client.post(
+            "/api/v1/agent/seed-blob",
+            json={
+                "path": "antizapret:allowed_ips",
+                "content": base64.b64encode(b"x").decode(),
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_seed_blob_overwrites_existing_blob(self, client, db):
+        # Pre-populate with admin-attributed value
+        WgBlobStore(db).put("antizapret:allowed_ips", b"old, admin, value", by="admin")
+        db.commit()
+
+        node = _make_node(db)
+        resp = client.post(
+            "/api/v1/agent/seed-blob",
+            json={
+                "path": "antizapret:allowed_ips",
+                "content": base64.b64encode(b"new value").decode(),
+            },
+            headers=_agent_auth(node.enroll_token),
+        )
+        assert resp.status_code == 204
+
+        db.expire_all()
+        # Agent push wins unconditionally (design: node = source of truth)
+        assert WgBlobStore(db).get("antizapret:allowed_ips") == b"new value"
+
 
 # ── Nodes CRUD tests ──
 
