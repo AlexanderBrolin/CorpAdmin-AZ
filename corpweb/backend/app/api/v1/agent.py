@@ -54,6 +54,7 @@ def _require_node(
 # cannot derive on its own.
 _SEED_BLOB_WHITELIST: frozenset[str] = frozenset({
     "antizapret:allowed_ips",
+    "/root/antizapret/setup",
 })
 
 

@@ -199,6 +199,29 @@ class TestAgentSeedBlob:
         blob = WgBlobStore(db).get("antizapret:allowed_ips")
         assert blob == b"10.29.8.0/24, 1.2.3.0/24"
 
+    def test_seed_blob_writes_setup(self, client, db):
+        node = _make_node(db)
+        raw = b"WIREGUARD_HOST=bb.azfi.ru\nROUTE_ALL=n\n"
+        resp = client.post(
+            "/api/v1/agent/seed-blob",
+            json={"path": "/root/antizapret/setup", "content": base64.b64encode(raw).decode()},
+            headers=_agent_auth(node.enroll_token),
+        )
+        assert resp.status_code == 204
+
+        db.expire_all()
+        assert WgBlobStore(db).get("/root/antizapret/setup") == raw
+
+    def test_seed_blob_rejects_unknown_path(self, client, db):
+        node = _make_node(db)
+        resp = client.post(
+            "/api/v1/agent/seed-blob",
+            json={"path": "/etc/passwd", "content": base64.b64encode(b"x").decode()},
+            headers=_agent_auth(node.enroll_token),
+        )
+        assert resp.status_code == 400
+        assert WgBlobStore(db).get("/etc/passwd") is None
+
 
 # ── Nodes CRUD tests ──
 
