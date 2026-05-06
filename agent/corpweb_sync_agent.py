@@ -11,6 +11,7 @@ Config: /etc/corpweb-sync-agent.env
   AGENT_HOSTNAME=<hostname>
 """
 
+import base64
 import glob
 import hashlib
 import json
@@ -387,6 +388,21 @@ def _read_setup() -> bytes | None:
     if not p.exists():
         return None
     return p.read_bytes()
+
+
+def _push_seed_blob(path: str, content: bytes) -> None:
+    """POST {path, base64(content)} to /api/v1/agent/seed-blob.
+
+    Errors are logged and swallowed — the next reconcile/doall cycle retries.
+    """
+    try:
+        api_post(
+            "/api/v1/agent/seed-blob",
+            {"path": path, "content": base64.b64encode(content).decode()},
+        )
+        log.info("seed-blob pushed: path=%s bytes=%d", path, len(content))
+    except (requests.HTTPError, requests.ConnectionError, requests.Timeout) as exc:
+        log.warning("seed-blob push failed: path=%s err=%s", path, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -796,7 +812,6 @@ def _apply_wg_config(cfg: dict) -> None:
 def startup_reconcile() -> None:
     """Fetch all 12 managed files from the control plane and apply if changed."""
     log.info("Running startup reconcile for %d files", len(MANAGED_FILES))
-    import base64
 
     for path, hook in MANAGED_FILES:
         try:
@@ -811,6 +826,17 @@ def startup_reconcile() -> None:
                 log.warning("Failed to fetch %s: %s", path, exc)
         except (requests.ConnectionError, KeyError) as exc:
             log.warning("Failed to fetch %s: %s", path, exc)
+
+    # Push node-side ground truth back to CP (CorpAdmin-AZ-byc).
+    # blob_path is the canonical key CP stores under — independent of where
+    # the parser reads from (monkeypatched _SETUP_PATH in tests, real path in prod).
+    for blob_path, parser in (
+        ("antizapret:allowed_ips", _parse_allowed_ips_from_template),
+        ("/root/antizapret/setup", _read_setup),
+    ):
+        content = parser()
+        if content is not None:
+            _push_seed_blob(blob_path, content)
 
     log.info("Startup reconcile done")
 
