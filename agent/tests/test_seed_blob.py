@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import pathlib
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -127,5 +127,44 @@ def test_startup_reconcile_skips_push_when_parsers_return_none(tmp_path, monkeyp
 
     with patch.object(agent, "api_post") as mock_post:
         agent.startup_reconcile()
+
+    assert mock_post.call_args_list == []
+
+
+# ---------------------------------------------------------------------------
+# Push integration: _run_doall
+# ---------------------------------------------------------------------------
+
+def test_run_doall_success_pushes_allowed_ips(tmp_path, monkeypatch):
+    target = tmp_path / "client" / "amneziawg" / "antizapret"
+    target.mkdir(parents=True)
+    (target / "antizapret-foo-am.conf").write_text(CONF_FIXTURE)
+    monkeypatch.setattr(agent, "_TEMPLATE_CONF_GLOB", str(target / "antizapret-*-am.conf"))
+
+    fake_run = MagicMock(return_value=MagicMock(returncode=0, stderr=""))
+    with patch.object(agent.subprocess, "run", fake_run), \
+         patch.object(agent, "api_post") as mock_post:
+        agent._run_doall()
+
+    assert mock_post.call_count == 1
+    body = mock_post.call_args.args[1]
+    assert body["path"] == "antizapret:allowed_ips"
+    assert base64.b64decode(body["content"]) == \
+        b"10.29.8.0/24, 1.2.3.0/24, 4.5.6.0/24"
+
+
+def test_run_doall_failure_does_not_push(tmp_path, monkeypatch):
+    import subprocess as sp
+    target = tmp_path / "client" / "amneziawg" / "antizapret"
+    target.mkdir(parents=True)
+    (target / "antizapret-foo-am.conf").write_text(CONF_FIXTURE)
+    monkeypatch.setattr(agent, "_TEMPLATE_CONF_GLOB", str(target / "antizapret-*-am.conf"))
+
+    def boom(*args, **kwargs):
+        raise sp.CalledProcessError(returncode=1, cmd=args[0], stderr="oops")
+
+    with patch.object(agent.subprocess, "run", side_effect=boom), \
+         patch.object(agent, "api_post") as mock_post:
+        agent._run_doall()
 
     assert mock_post.call_args_list == []

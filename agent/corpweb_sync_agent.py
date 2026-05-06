@@ -425,8 +425,15 @@ def _run_doall() -> None:
         )
     except subprocess.CalledProcessError as exc:
         log.error("doall.sh failed (rc=%d): %s", exc.returncode, exc.stderr.strip())
+        return
     except FileNotFoundError:
         log.error("/root/antizapret/doall.sh not found")
+        return
+
+    # doall succeeded — template-conf may have changed, push fresh blob
+    content = _parse_allowed_ips_from_template()
+    if content is not None:
+        _push_seed_blob("antizapret:allowed_ips", content)
 
 
 def schedule_doall() -> None:
