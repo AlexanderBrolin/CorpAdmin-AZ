@@ -190,12 +190,12 @@ def _push_seed_blob(path: str, content: bytes) -> None:
 
 ##### Триггер 1 — в `startup_reconcile`
 
-Сразу после fetch'а managed_files (в конце метода, см. [corpweb_sync_agent.py:759](../../../agent/corpweb_sync_agent.py#L759)):
+Сразу после fetch'а managed_files (в конце функции, см. [corpweb_sync_agent.py:759](../../../agent/corpweb_sync_agent.py#L759)). `startup_reconcile` — module-level функция, не метод:
 
 ```python
-def startup_reconcile(self) -> None:
-    ...
+def startup_reconcile() -> None:
     # existing logic: fetch managed_files, write to disk, etc.
+    ...
 
     # NEW: push node-side ground truth
     for path, parser in (
@@ -204,22 +204,34 @@ def startup_reconcile(self) -> None:
     ):
         content = parser()
         if content is not None:
-            self._push_seed_blob(path, content)
+            _push_seed_blob(path, content)
 ```
 
 ##### Триггер 2 — после успешного `_run_doall()`
 
-В конце `_run_doall()`, в success-path (после `subprocess.run(...)` без ошибки):
+В конце `_run_doall()`, в success-path. Текущая реализация ([corpweb_sync_agent.py:364](../../../agent/corpweb_sync_agent.py#L364)) использует `subprocess.run(check=True)` — нет returncode-переменной. Меняем на двухшаговую структуру:
 
 ```python
-def _run_doall(self) -> None:
-    ...
-    # existing logic
-    rc = subprocess.run(["/root/antizapret/doall.sh"], ...)
-    if rc.returncode == 0:
-        content = _parse_allowed_ips_from_template()
-        if content is not None:
-            self._push_seed_blob("antizapret:allowed_ips", content)
+def _run_doall() -> None:
+    log.info("Running /root/antizapret/doall.sh")
+    try:
+        subprocess.run(
+            ["/root/antizapret/doall.sh"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        log.error("doall.sh failed (rc=%d): %s", exc.returncode, exc.stderr.strip())
+        return
+    except FileNotFoundError:
+        log.error("/root/antizapret/doall.sh not found")
+        return
+
+    # NEW: doall succeeded — template-conf may have changed, push fresh blob
+    content = _parse_allowed_ips_from_template()
+    if content is not None:
+        _push_seed_blob("antizapret:allowed_ips", content)
 ```
 
 `setup` после doall не пушим — doall его не меняет.
@@ -321,6 +333,6 @@ def _has_registered_active_node(self) -> bool:
 1. ✅ После merge + deploy на bb.azfi.ru + restart `corpweb-sync-agent` на node-bb01:
    - `psql -c "SELECT octet_length(content), updated_by FROM wg_file_state WHERE path='antizapret:allowed_ips'"` возвращает `>500, agent-sync`.
    - Скачивание `.conf` через админ-панель для vpn-az клиента содержит `AllowedIPs = 10.29.8.0/24, 10.30.0.0/15, ...` (≥40 подсетей).
-2. ✅ После admin-edit любого `*_INCLUDE=` через UI: в течение 30 сек blob `antizapret:allowed_ips` обновлён до значения, согласованного с новым template на ноде.
+2. ✅ После того как `doall.sh` отработал на ноде (триггеры: admin-edit `config/*.txt` через Files Editor → SSE → hook=doall на ноде; cron `antizapret-update.timer`; ручной запуск админом) — в течение 30 сек blob `antizapret:allowed_ips` обновлён до значения template на ноде. Замечание: переключатели `*_INCLUDE=y/n` в setup-форме UI не обновляют существующие клиентские template-conf (это upstream-ограничение AntiZapret-VPN: `${IPS}` фиксируется в каждом `antizapret-*-am.conf` при `client.sh add`); чтобы новый набор подсетей попал в blob, нужно либо запустить `doall.sh` вручную, либо пересоздать клиента.
 3. ✅ На свежем CP с одной зарегистрированной нодой первый `lifespan()` не вызывает SSE-broadcast пустого setup'а — нода НЕ перезаписывает свой `/root/antizapret/setup` пустым.
 4. ✅ `pytest corpweb/backend/tests/ agent/tests/` — все тесты зелёные, в т.ч. 8 новых из стратегии выше.
