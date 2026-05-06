@@ -6,6 +6,7 @@ import hashlib
 
 from tests.conftest import auth_header
 from app.db.models import Node, WgFileState, WgServerKeys
+from app.services.wg_blob_store import WgBlobStore
 
 
 def _make_node(db, hostname="wgfi2", token="tok-test-001"):
@@ -178,6 +179,25 @@ class TestAgentDrain:
         # Verify node health updated
         db.refresh(node)
         assert node.health == "draining"
+
+
+class TestAgentSeedBlob:
+    def test_seed_blob_writes_allowed_ips(self, client, db):
+        node = _make_node(db)
+        payload = {
+            "path": "antizapret:allowed_ips",
+            "content": base64.b64encode(b"10.29.8.0/24, 1.2.3.0/24").decode(),
+        }
+        resp = client.post(
+            "/api/v1/agent/seed-blob",
+            json=payload,
+            headers=_agent_auth(node.enroll_token),
+        )
+        assert resp.status_code == 204
+
+        db.expire_all()
+        blob = WgBlobStore(db).get("antizapret:allowed_ips")
+        assert blob == b"10.29.8.0/24, 1.2.3.0/24"
 
 
 # ── Nodes CRUD tests ──

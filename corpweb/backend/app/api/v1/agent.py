@@ -48,6 +48,20 @@ def _require_node(
 # Endpoints
 # ---------------------------------------------------------------------------
 
+# Whitelist of blob paths agents are allowed to seed via /seed-blob.
+# Each entry is a path that lives at one well-defined column in WgBlobStore;
+# expand only when there is a concrete node-side source of truth that CP
+# cannot derive on its own.
+_SEED_BLOB_WHITELIST: frozenset[str] = frozenset({
+    "antizapret:allowed_ips",
+})
+
+
+class SeedBlobRequest(BaseModel):
+    path: str
+    content: str  # base64-encoded bytes
+
+
 class RegisterRequest(BaseModel):
     hostname: str
     private_ip: str
@@ -186,6 +200,24 @@ def drain(
     node.health = "draining"
     db.commit()
     return {"ok": True, "ttl_minutes": 10}
+
+
+@router.post("/seed-blob", status_code=204)
+def seed_blob(
+    req: SeedBlobRequest,
+    db: Session = Depends(get_db),
+    node: Node = Depends(_require_node),
+) -> None:
+    if req.path not in _SEED_BLOB_WHITELIST:
+        raise HTTPException(status_code=400, detail=f"path {req.path!r} not allowed")
+    try:
+        raw = base64.b64decode(req.content, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="content is not valid base64")
+    WgBlobStore(db).put(req.path, raw, by="agent-sync")
+    logger.info(
+        "agent-sync: node=%s path=%s bytes=%d", node.id, req.path, len(raw),
+    )
 
 
 # ---------------------------------------------------------------------------
