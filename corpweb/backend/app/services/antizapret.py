@@ -9,6 +9,7 @@ from typing import Dict, Optional
 
 from sqlalchemy.orm import Session
 
+from app.db.models import Node
 from app.services.wg_blob_store import WgBlobStore
 
 logger = logging.getLogger(__name__)
@@ -77,19 +78,35 @@ class AntizapretServiceError(Exception):
     pass
 
 
+def _has_registered_active_node(db: Session) -> bool:
+    """True if any Node row has health 'ok' or 'degraded'."""
+    return db.query(Node).filter(Node.health.in_(("ok", "degraded"))).first() is not None
+
+
 class AntizapretService:
 
     def __init__(self, db: Session):
+        self._db = db
         self._store = WgBlobStore(db)
 
     def bootstrap_blob_store(self) -> None:
         """
         Seed default setup + empty config files into blob store if missing.
         Idempotent — never overwrites an existing blob.
+
+        Setup default is deferred when an active node is already registered:
+        the agent will push the real setup at startup_reconcile, avoiding
+        an SSE-broadcast that would overwrite the node's working setup.
         """
         if self._store.get(ANTIZAPRET_SETUP_FILE) is None:
-            self._store.put(ANTIZAPRET_SETUP_FILE, _load_default_setup(), by="bootstrap")
-            logger.info("Seeded default %s into blob store", ANTIZAPRET_SETUP_FILE)
+            if _has_registered_active_node(self._db):
+                logger.info(
+                    "bootstrap_blob_store: skipping setup default — "
+                    "active node will push it via /seed-blob"
+                )
+            else:
+                self._store.put(ANTIZAPRET_SETUP_FILE, _load_default_setup(), by="bootstrap")
+                logger.info("Seeded default %s into blob store", ANTIZAPRET_SETUP_FILE)
         for path in EDITABLE_FILES.values():
             if self._store.get(path) is None:
                 self._store.put(path, b"", by="bootstrap")
