@@ -52,7 +52,10 @@ cd CorpAdmin-AZ/corpweb
 sudo ./install-native.sh
 ```
 
-Скрипт автоматически установит все зависимости (PostgreSQL, Python, Node.js, nginx, Certbot), создаст БД, соберёт frontend, настроит nginx с SSL, запустит backend.
+Скрипт автоматически установит все зависимости (PostgreSQL, Python, Node.js, nginx, Certbot), создаст БД, соберёт frontend, настроит nginx с SSL, запустит backend. Дополнительно скрипт:
+
+- устанавливает `iptables` + `iptables-persistent` + `netfilter-persistent` (для DNAT-балансировщика)
+- включает `net.ipv4.ip_forward=1` через `/etc/sysctl.d/99-corpweb-forwarding.conf`
 
 ### Ручная установка
 
@@ -64,7 +67,12 @@ sudo ./install-native.sh
 ```bash
 apt-get update && apt-get install -y \
   nginx postgresql python3-pip python3-venv git \
-  certbot python3-certbot-nginx nodejs npm libnginx-mod-stream
+  certbot python3-certbot-nginx nodejs npm libnginx-mod-stream \
+  iptables iptables-persistent netfilter-persistent
+
+# Включить IP forwarding (для DNAT-балансировщика)
+echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-corpweb-forwarding.conf
+sysctl --system
 ```
 
 ### 2. Клонирование и настройка
@@ -276,7 +284,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AlexanderBrolin/CorpAdmin-AZ
 |------|-------------------|
 | `/etc/wireguard/antizapret.conf` | `wg syncconf antizapret` |
 | `/etc/wireguard/vpn.conf` | `wg syncconf vpn` |
-| `/root/antizapret/setup` | — |
+| `/root/antizapret/setup` | `doall_and_restart_antizapret` (при изменении blob агент запускает `doall.sh` — rebuild template-conf и push свежего `antizapret:allowed_ips` — + `systemctl restart antizapret.service`. См. PR #11/#12.) |
 | `/root/antizapret/config/include-hosts.txt` | `doall.sh` (debounce 5с) |
 | `/root/antizapret/config/exclude-hosts.txt` | `doall.sh` |
 | `/root/antizapret/config/include-ips.txt` | `doall.sh` |

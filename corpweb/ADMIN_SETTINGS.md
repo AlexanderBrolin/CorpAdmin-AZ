@@ -15,88 +15,74 @@ CREATE TABLE system_settings (
     id INTEGER PRIMARY KEY DEFAULT 1,              -- Всегда 1 (singleton)
     max_configs_per_user INTEGER NOT NULL DEFAULT 2,  -- Максимум конфигов на пользователя
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_by VARCHAR(50)                         -- Имя админа, внесшего изменение
+    updated_by VARCHAR(50),                        -- Имя админа, внесшего изменение
+    google_play_url VARCHAR(500),                  -- Ссылка на Google Play в frontend (Установка → Android)
+    app_store_url VARCHAR(500),                    -- Ссылка на App Store (Установка → iOS)
+    apk_url VARCHAR(500),                          -- Прямая ссылка на APK
+    windows_url VARCHAR(500)                       -- Ссылка на Windows-клиент
 );
 ```
 
+| Колонка | Тип | Default | Назначение |
+|---|---|---|---|
+| `google_play_url` | VARCHAR(500) | NULL | Ссылка на Google Play в frontend (Установка → Android) |
+| `app_store_url` | VARCHAR(500) | NULL | Ссылка на App Store (Установка → iOS) |
+| `apk_url` | VARCHAR(500) | NULL | Прямая ссылка на APK |
+| `windows_url` | VARCHAR(500) | NULL | Ссылка на Windows-клиент |
+
+Эти 4 колонки добавляются в существующую таблицу через `ADD COLUMN IF NOT EXISTS` в [`corpweb/backend/app/db/init_db.py:70-77`](backend/app/db/init_db.py#L70-L77) — safe migration на уже установленных CP.
+
 **Важно:** Эта таблица является singleton - в ней всегда только одна строка с `id = 1`.
 
-### Триггер проверки
+### Application-level enforcement
 
-При каждой попытке создания конфига автоматически срабатывает PostgreSQL триггер:
+Лимит проверяется в Python в [`corpweb/backend/app/api/v1/configs.py:85-94`](backend/app/api/v1/configs.py#L85-L94) перед INSERT нового конфига:
 
-```sql
-CREATE OR REPLACE FUNCTION check_user_config_limit()
-RETURNS TRIGGER AS $$
-DECLARE
-    max_configs INTEGER;
-    current_count INTEGER;
-BEGIN
-    -- Получаем текущий лимит из system_settings
-    SELECT max_configs_per_user INTO max_configs
-    FROM system_settings
-    WHERE id = 1;
-
-    -- Считаем активные конфиги пользователя
-    SELECT COUNT(*) INTO current_count
-    FROM vpn_configs
-    WHERE user_id = NEW.user_id AND is_active = TRUE;
-
-    -- Проверяем превышение лимита
-    IF current_count >= max_configs THEN
-        RAISE EXCEPTION 'User cannot have more than % active configs', max_configs;
-    END IF;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+```python
+active_count = crud_config.count_active_by_user(db, current_user.id)
+if active_count >= max_configs:
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Maximum {max_configs} active configs allowed. Delete an existing config first."
+    )
 ```
 
-Этот триггер:
-1. Читает текущий лимит из `system_settings`
-2. Подсчитывает активные конфиги пользователя
-3. Блокирует создание, если лимит достигнут
-4. **Автоматически использует актуальное значение** без перезапуска
+При превышении — HTTP 400, INSERT не происходит. Race-condition между двумя одновременными POST-запросами теоретически возможен (count + insert не atomic); на практике не наблюдался, т.к. UI блокирует кнопку "Добавить" при достижении лимита. Если станет проблемой — мигрировать в PG-триггер (отдельный issue).
 
-## API Endpoints (планируется)
+## API Endpoints
 
-### Получение текущих настроек
+### GET /api/v1/admin/settings
 
-```http
-GET /api/v1/admin/settings
-Authorization: Bearer <admin_token>
+Реализовано в [`corpweb/backend/app/api/v1/admin.py:304-316`](backend/app/api/v1/admin.py#L304-L316). Возвращает текущий объект `SystemSettings`. Требует admin-сессию.
+
+Пример:
+```bash
+curl -H "Authorization: Bearer $TOKEN" https://panel.example.com/api/v1/admin/settings
 ```
 
-**Ответ:**
+Ответ:
 ```json
 {
   "id": 1,
   "max_configs_per_user": 2,
-  "updated_at": "2026-02-16T18:30:00Z",
+  "google_play_url": null,
+  "app_store_url": null,
+  "apk_url": null,
+  "windows_url": null,
+  "updated_at": "2026-05-07T12:34:56Z",
   "updated_by": "admin"
 }
 ```
 
-### Изменение лимита конфигураций
+### PATCH /api/v1/admin/settings
 
-```http
-PATCH /api/v1/admin/settings
-Authorization: Bearer <admin_token>
-Content-Type: application/json
+Реализовано в [`corpweb/backend/app/api/v1/admin.py:319-357`](backend/app/api/v1/admin.py#L319-L357). Принимает `SystemSettingsUpdate` (см. `backend/app/schemas/settings.py`). `max_configs_per_user` валидируется в диапазоне 1-10.
 
-{
-  "max_configs_per_user": 5
-}
-```
-
-**Ответ:**
-```json
-{
-  "id": 1,
-  "max_configs_per_user": 5,
-  "updated_at": "2026-02-16T19:00:00Z",
-  "updated_by": "admin"
-}
+Пример:
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"max_configs_per_user": 5}' \
+     https://panel.example.com/api/v1/admin/settings
 ```
 
 **Ограничения:**
@@ -110,7 +96,7 @@ Content-Type: application/json
 
 В разделе "Настройки системы" администратор увидит:
 
-```
+```text
 ┌──────────────────────────────────────────────┐
 │ Системные настройки                          │
 ├──────────────────────────────────────────────┤
@@ -170,56 +156,9 @@ SET max_configs_per_user = 5,
 WHERE id = 1;
 ```
 
-## Логика проверки в коде (планируется)
+## Логика проверки в коде
 
-### Backend сервис
-
-```python
-# app/services/config_service.py
-from app.db.models import SystemSettings
-
-async def check_config_limit(db: Session, user_id: UUID) -> bool:
-    """
-    Проверяет, может ли пользователь создать еще один конфиг
-
-    Returns:
-        True - может создать
-        False - лимит достигнут
-    """
-    # Получаем текущий лимит
-    settings = db.query(SystemSettings).filter(SystemSettings.id == 1).first()
-    max_configs = settings.max_configs_per_user if settings else 2
-
-    # Считаем активные конфиги
-    current_count = db.query(VPNConfig).filter(
-        VPNConfig.user_id == user_id,
-        VPNConfig.is_active == True
-    ).count()
-
-    return current_count < max_configs
-```
-
-### API endpoint
-
-```python
-# app/api/v1/configs.py
-@router.post("/configs")
-async def create_config(
-    config_data: ConfigCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    # Проверка лимита
-    if not await check_config_limit(db, current_user.id):
-        settings = db.query(SystemSettings).filter(SystemSettings.id == 1).first()
-        max_limit = settings.max_configs_per_user if settings else 2
-        raise HTTPException(
-            status_code=400,
-            detail=f"Maximum {max_limit} configs per user. Delete existing config first."
-        )
-
-    # Создание конфига...
-```
+Реализовано в [`corpweb/backend/app/api/v1/configs.py:85-94`](backend/app/api/v1/configs.py#L85-L94). Перед созданием конфига читается `SystemSettings` из БД, затем вызывается `crud_config.count_active_by_user`. Если активных конфигов уже `>= max_configs_per_user` — поднимается HTTP 400 без INSERT.
 
 ## Преимущества подхода
 
@@ -229,9 +168,9 @@ async def create_config(
 - Существующие конфиги пользователей не затрагиваются
 
 ### 2. Безопасность
-- Триггер БД гарантирует соблюдение лимита
-- Невозможно обойти проверку на уровне приложения
-- Атомарная проверка без race conditions
+- Application-level enforcement блокирует превышение лимита (HTTP 400)
+- Проверка выполняется до любого INSERT
+- UI дополнительно блокирует кнопку при достижении лимита
 
 ### 3. Масштабируемость
 - Легко добавить новые настройки в `system_settings`
@@ -311,14 +250,14 @@ WHERE user_id = '<user_uuid>' AND is_active = TRUE;
 
 **Решение:** Если count >= max_configs, пользователь должен удалить один конфиг
 
-### Проблема: Триггер не срабатывает
+### Проблема: Лимит не применяется после изменения настроек
 
-**Проверка:** Убедитесь, что триггер существует
+**Проверка:** Убедитесь, что значение сохранилось в БД
 ```sql
-SELECT * FROM pg_trigger WHERE tgname = 'enforce_config_limit';
+SELECT max_configs_per_user FROM system_settings WHERE id = 1;
 ```
 
-**Решение:** Пересоздайте триггер из миграции
+**Решение:** Если значение отличается от ожидаемого — используйте PATCH-endpoint или обновите напрямую через SQL (см. Сценарий 3)
 
 ## Заключение
 

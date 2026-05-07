@@ -46,6 +46,15 @@ rm -f /etc/systemd/system/corpweb-backend.service
 systemctl daemon-reload
 print_success "Сервис удалён"
 
+# CorpAdmin-AZ-rce: удалить sysctl drop-in от install-native.sh (CorpAdmin-AZ-lpa).
+# Файл наш по имени и содержимому, удалять безопасно.
+if [[ -f /etc/sysctl.d/99-corpweb-forwarding.conf ]]; then
+    print_info "Удаление /etc/sysctl.d/99-corpweb-forwarding.conf..."
+    rm /etc/sysctl.d/99-corpweb-forwarding.conf
+    sysctl --system > /dev/null 2>&1 || true
+    print_success "sysctl drop-in удалён"
+fi
+
 # Stop Docker if running
 if command -v docker &> /dev/null; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,5 +88,11 @@ if [[ "$DEL_DB" == "y" || "$DEL_DB" == "Y" ]]; then
     print_success "База данных удалена"
 fi
 
+echo ""
+print_warning "iptables DNAT правила, написанные balancer.py, НЕ удалены автоматически."
+print_warning "Если они больше не нужны — выполните вручную:"
+print_warning "    iptables -t nat -F PREROUTING"
+print_warning "    netfilter-persistent save"
+print_warning "ВНИМАНИЕ: -F PREROUTING удалит ВСЕ DNAT правила в этой цепочке, не только CorpAdmin."
 echo ""
 print_success "CorpWeb удалён"
