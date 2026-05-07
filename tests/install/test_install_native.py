@@ -24,3 +24,15 @@ def test_installs_iptables_and_persistent():
         "apt-get install -y -qq iptables iptables-persistent netfilter-persistent"
         in TEXT
     ), "iptables/iptables-persistent/netfilter-persistent install line missing"
+
+
+def test_writes_ip_forward_sysctl_drop_in():
+    # CorpAdmin-AZ-lpa: without net.ipv4.ip_forward=1 the kernel drops packets
+    # on the FORWARD chain after DNAT, so the balancer rules look fine
+    # (counters tick) but no traffic reaches the WG ifaces.
+    assert "/etc/sysctl.d/99-corpweb-forwarding.conf" in TEXT, \
+        "expected drop-in file path /etc/sysctl.d/99-corpweb-forwarding.conf"
+    assert "net.ipv4.ip_forward=1" in TEXT, \
+        "expected net.ipv4.ip_forward=1 directive"
+    assert "sysctl --system" in TEXT, \
+        "expected `sysctl --system` to apply the drop-in immediately"
