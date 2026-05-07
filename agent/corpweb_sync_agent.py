@@ -363,24 +363,48 @@ def sync_escape_rules() -> dict:
 
 _TEMPLATE_CONF_GLOB = "/root/antizapret/client/amneziawg/antizapret/antizapret-*-am.conf"
 _SETUP_PATH = "/root/antizapret/setup"
+# /etc/wireguard/ips is rebuilt by upstream parse.sh on every doall (mirrors
+# /root/antizapret/result/ips). Format: ", 10.30.0.0/15, 1.2.3.0/24, …".
+# It reflects the current set of *_INCLUDE toggles; *-am.conf does not.
+_RESULT_IPS_PATH = "/etc/wireguard/ips"
 _ALLOWED_IPS_RE = re.compile(r"^\s*AllowedIPs\s*=\s*(.+?)\s*$", re.MULTILINE)
 
 
 def _parse_allowed_ips_from_template() -> bytes | None:
     """
-    Return AllowedIPs from the lexicographically first template-conf,
-    or None if no match.
+    Return AllowedIPs for the antizapret iface, prioritising the fresh
+    parse.sh output over the per-client template snapshot.
 
-    All client confs on one node share the same AllowedIPs (the [Peer]
-    AllowedIPs is per-iface, not per-client). sorted()[0] makes the
-    selection deterministic and testable.
+    Source of truth precedence:
+      1. *-am.conf provides the network prefix (e.g. ``10.29.8.0/24``).
+         This is stable across *_INCLUDE toggles, so reading it from the
+         baked client conf is fine.
+      2. /etc/wireguard/ips provides the rebuilt subnet list. parse.sh
+         updates it on every doall, so it reflects the current toggles.
+         If absent (early-bootstrap node where doall has not yet run),
+         fall back to the full AllowedIPs string from *-am.conf.
+
+    Returns None if no template-conf is present at all.
     """
     matches = sorted(glob.glob(_TEMPLATE_CONF_GLOB))
     if not matches:
         return None
     text = pathlib.Path(matches[0]).read_text()
     m = _ALLOWED_IPS_RE.search(text)
-    return m.group(1).encode() if m else None
+    if not m:
+        return None
+    full_stale = m.group(1)
+
+    fresh_path = pathlib.Path(_RESULT_IPS_PATH)
+    if not fresh_path.exists():
+        return full_stale.encode()
+
+    prefix = full_stale.split(",", 1)[0].strip()
+    fresh = fresh_path.read_text().strip()
+    if not fresh:
+        return prefix.encode()
+    sep = "" if fresh.startswith(",") else ", "
+    return f"{prefix}{sep}{fresh}".encode()
 
 
 def _read_setup() -> bytes | None:
