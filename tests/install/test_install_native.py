@@ -36,3 +36,14 @@ def test_writes_ip_forward_sysctl_drop_in():
         "expected net.ipv4.ip_forward=1 directive"
     assert "sysctl --system" in TEXT, \
         "expected `sysctl --system` to apply the drop-in immediately"
+
+
+def test_alembic_does_not_swallow_stderr():
+    # CorpAdmin-AZ-9nq partial: hiding alembic stderr behind 2>/dev/null
+    # masks real migration failures; install reports success while DB schema
+    # is partially broken (missing pg_notify triggers → SSE/sync silently dies).
+    lines = [l for l in TEXT.splitlines() if "alembic" in l and "upgrade head" in l]
+    assert lines, "alembic upgrade head invocation missing from install-native.sh"
+    for line in lines:
+        assert "2>/dev/null" not in line, \
+            f"alembic stderr is being swallowed: {line.strip()!r}"
