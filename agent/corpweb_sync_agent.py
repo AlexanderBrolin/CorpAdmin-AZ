@@ -75,12 +75,13 @@ HOSTNAME: str = CFG.get("AGENT_HOSTNAME", "") or os.uname().nodename
 # Each entry: (path, hook_type)
 # hook_type: None | "wg_antizapret" | "wg_vpn" | "awg_az_escape"
 #          | "awg_vpn_escape" | "doall" | "restart_antizapret"
+#          | "doall_and_restart_antizapret"
 MANAGED_FILES: list[tuple[str, str | None]] = [
     ("/etc/wireguard/antizapret.conf", "wg_antizapret"),
     ("/etc/wireguard/vpn.conf", "wg_vpn"),
     ("/etc/amnezia/amneziawg/az_escape.conf", "awg_az_escape"),
     ("/etc/amnezia/amneziawg/vpn_escape.conf", "awg_vpn_escape"),
-    ("/root/antizapret/setup", "restart_antizapret"),
+    ("/root/antizapret/setup", "doall_and_restart_antizapret"),
     ("/root/antizapret/config/include-hosts.txt", "doall"),
     ("/root/antizapret/config/exclude-hosts.txt", "doall"),
     ("/root/antizapret/config/include-ips.txt", "doall"),
@@ -625,6 +626,12 @@ def apply_path(path: str, content: bytes, hook: str | None) -> bool:
     elif hook == "doall":
         schedule_doall()
     elif hook == "restart_antizapret":
+        schedule_restart_antizapret()
+    elif hook == "doall_and_restart_antizapret":
+        # Setup file changes (TELEGRAM_INCLUDE, GOOGLE_INCLUDE, …) require both:
+        # doall.sh rebuilds template-conf so antizapret:allowed_ips blob refreshes,
+        # and antizapret.service restart makes up.sh re-apply iptables/sysctl deps.
+        schedule_doall()
         schedule_restart_antizapret()
 
     return True
