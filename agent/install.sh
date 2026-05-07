@@ -8,6 +8,13 @@
 # Optional:
 #   CORPWEB_HOSTNAME — override reported hostname (defaults to $(hostname -f))
 
+# ── Получение enroll token ─────────────────────────────────────────────────
+# CORPWEB_TOKEN, передаваемый этому скрипту, — это enroll-token из CP.
+# Где взять:
+#   • UI: панель CP → Ноды → "Добавить ноду" → скопировать enroll-token из созданной строки.
+#   • API: POST /api/v1/admin/nodes (требует admin-сессию или Bearer admin-токен).
+# Token одноразовый, действует 1 час с момента создания.
+
 set -euo pipefail
 
 AGENT_SCRIPT_SRC="$(cd "$(dirname "$0")" && pwd)/corpweb_sync_agent.py"
@@ -32,6 +39,7 @@ if [[ -z "${CORPWEB_CP_URL:-}" ]]; then
   exit 1
 fi
 
+echo "INFO: Enroll token: получите в админ-панели CP (Ноды → Добавить ноду)."
 if [[ -z "${CORPWEB_TOKEN:-}" ]]; then
   echo "ERROR: CORPWEB_TOKEN is not set" >&2
   exit 1

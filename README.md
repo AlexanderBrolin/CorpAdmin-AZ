@@ -166,8 +166,7 @@ nano /root/antizapret/config/include-ips.txt
 ```
 /root/antizapret/doall.sh
 ```
-После обновления списка АнтиЗапрета, клиентам OpenVPN (antizapret-\*.ovpn) достаточно переподключиться к серверу\
-А клиентам WireGuard/AmneziaWG нужно добавить новые IP-адреса через запятую в конфигурационные файлы (antizapret-\*.conf) в строке AllowedIPs
+После обновления списка АнтиЗапрета (через панель → Настройки AZ или через ручной запуск `doall.sh` на ноде) клиенты OpenVPN получают новые маршруты при следующем подключении. Для WireGuard / AmneziaWG список `AllowedIPs` в скачиваемом `.conf` обновляется автоматически: агент на ноде после `doall.sh` пушит свежий `/etc/wireguard/ips` в blob `antizapret:allowed_ips` на CP, и следующий download через панель отдаст актуальный список без ручной правки клиентского конфига.
 
 ***
 
