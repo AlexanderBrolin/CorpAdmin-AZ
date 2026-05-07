@@ -33,9 +33,14 @@ def reset_timers():
 
 
 class TestManagedFilesWiring:
-    def test_setup_file_has_restart_antizapret_hook(self):
+    def test_setup_file_has_doall_and_restart_hook(self):
+        # Changing /root/antizapret/setup (e.g. TELEGRAM_INCLUDE, GOOGLE_INCLUDE,
+        # WIREGUARD_BACKUP) requires BOTH doall.sh (to rebuild template-conf and
+        # refresh antizapret:allowed_ips blob) AND a service restart (so up.sh
+        # re-applies iptables rules). A single restart-only hook leaves the
+        # AllowedIPs blob stale, so client configs do not pick up admin changes.
         mapping = dict(agent.MANAGED_FILES)
-        assert mapping["/root/antizapret/setup"] == "restart_antizapret"
+        assert mapping["/root/antizapret/setup"] == "doall_and_restart_antizapret"
 
     def test_managed_files_includes_escape_ifaces(self):
         mapping = dict(agent.MANAGED_FILES)
@@ -119,6 +124,32 @@ class TestApplyPathDispatch:
             changed = agent.apply_path(str(target), content, "restart_antizapret")
         assert changed is False
         sched.assert_not_called()
+
+    def test_doall_and_restart_hook_schedules_both(self, tmp_path):
+        target = tmp_path / "setup"
+        with patch("corpweb_sync_agent.schedule_doall") as sched_doall, \
+             patch("corpweb_sync_agent.schedule_restart_antizapret") as sched_restart:
+            changed = agent.apply_path(
+                str(target),
+                b"TELEGRAM_INCLUDE=y\nGOOGLE_INCLUDE=n\n",
+                "doall_and_restart_antizapret",
+            )
+        assert changed is True
+        sched_doall.assert_called_once()
+        sched_restart.assert_called_once()
+
+    def test_unchanged_content_does_not_schedule_doall_and_restart(self, tmp_path):
+        target = tmp_path / "setup"
+        content = b"TELEGRAM_INCLUDE=y\n"
+        target.write_bytes(content)
+        with patch("corpweb_sync_agent.schedule_doall") as sched_doall, \
+             patch("corpweb_sync_agent.schedule_restart_antizapret") as sched_restart:
+            changed = agent.apply_path(
+                str(target), content, "doall_and_restart_antizapret"
+            )
+        assert changed is False
+        sched_doall.assert_not_called()
+        sched_restart.assert_not_called()
 
     def test_apply_path_dispatches_awg_az_escape(self, tmp_path):
         target = tmp_path / "az_escape.conf"
