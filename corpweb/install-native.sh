@@ -172,6 +172,17 @@ else
     print_success "iptables уже установлен"
 fi
 
+# net.ipv4.ip_forward — без него ядро дропает пакеты в FORWARD после DNAT.
+# Drop-in в /etc/sysctl.d переживает upgrade /etc/sysctl.conf;
+# `sysctl --system` применяет его в текущей сессии.
+print_info "Включение net.ipv4.ip_forward..."
+cat > /etc/sysctl.d/99-corpweb-forwarding.conf <<'EOF'
+# Managed by corpweb/install-native.sh — CorpAdmin-AZ-lpa
+net.ipv4.ip_forward=1
+EOF
+sysctl --system > /dev/null
+print_success "net.ipv4.ip_forward=1 (persistent)"
+
 # ── Шаг 2: Ввод параметров ───────────────────────────────────────────────────
 # Ручная установка: задайте переменные вручную
 #   DOMAIN="vpn.yourcompany.com"
