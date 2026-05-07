@@ -160,6 +160,29 @@ else
     print_success "Certbot уже установлен"
 fi
 
+# iptables + iptables-persistent — для DNAT-балансировщика (52443→51443 и т.д.).
+# Backend services/balancer.py:ensure_ports_reconciled пишет правила через `iptables`;
+# netfilter-persistent сохраняет их при reboot. Без этих пакетов балансировщик молча
+# no-op'ит (FileNotFoundError) → клиенты не подключаются.
+if ! command -v iptables-save &> /dev/null; then
+    print_info "Установка iptables и iptables-persistent..."
+    apt-get install -y -qq iptables iptables-persistent netfilter-persistent > /dev/null
+    print_success "iptables установлен"
+else
+    print_success "iptables уже установлен"
+fi
+
+# net.ipv4.ip_forward — без него ядро дропает пакеты в FORWARD после DNAT.
+# Drop-in в /etc/sysctl.d переживает upgrade /etc/sysctl.conf;
+# `sysctl --system` применяет его в текущей сессии.
+print_info "Включение net.ipv4.ip_forward..."
+cat > /etc/sysctl.d/99-corpweb-forwarding.conf <<'EOF'
+# Managed by corpweb/install-native.sh — CorpAdmin-AZ-lpa
+net.ipv4.ip_forward=1
+EOF
+sysctl --system > /dev/null
+print_success "net.ipv4.ip_forward=1 (persistent)"
+
 # ── Шаг 2: Ввод параметров ───────────────────────────────────────────────────
 # Ручная установка: задайте переменные вручную
 #   DOMAIN="vpn.yourcompany.com"
@@ -360,8 +383,8 @@ print_success ".env создан: $INSTALL_DIR/backend/.env"
 
 print_info "Применение миграций БД..."
 cd "$INSTALL_DIR/backend"
-"$INSTALL_DIR/backend/venv/bin/alembic" upgrade head 2>/dev/null || \
-    print_warning "Alembic: часть миграций уже применена"
+"$INSTALL_DIR/backend/venv/bin/alembic" upgrade head || \
+    print_warning "Alembic: часть миграций уже применена (или произошла ошибка — см. вывод выше)"
 print_success "Миграции применены"
 
 print_info "Инициализация БД (admin, системные настройки)..."
