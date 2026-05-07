@@ -32,6 +32,14 @@ PersistentKeepalive = 15
 """
 
 
+@pytest.fixture(autouse=True)
+def isolate_result_ips_path(tmp_path, monkeypatch):
+    """Default to a non-existent _RESULT_IPS_PATH so legacy tests fall back to
+    the *-am.conf parser. Tests that exercise the fresh-source code path
+    explicitly write to this path via monkeypatch."""
+    monkeypatch.setattr(agent, "_RESULT_IPS_PATH", str(tmp_path / "no-fresh-ips"))
+
+
 def test_parse_allowed_ips_returns_value(tmp_path, monkeypatch):
     target = tmp_path / "client" / "amneziawg" / "antizapret"
     target.mkdir(parents=True)
@@ -67,6 +75,61 @@ def test_parse_allowed_ips_picks_lexicographically_first(tmp_path, monkeypatch):
         str(target / "antizapret-*-am.conf"),
     )
     # aaa sorts first → returns CONF_FIXTURE's AllowedIPs
+    assert agent._parse_allowed_ips_from_template() == \
+        b"10.29.8.0/24, 1.2.3.0/24, 4.5.6.0/24"
+
+
+def test_parse_allowed_ips_uses_fresh_ips_when_available(tmp_path, monkeypatch):
+    # *-am.conf has stale baked AllowedIPs (snapshot from client.sh add time).
+    target = tmp_path / "client" / "amneziawg" / "antizapret"
+    target.mkdir(parents=True)
+    (target / "antizapret-foo-am.conf").write_text(CONF_FIXTURE)
+    monkeypatch.setattr(
+        agent, "_TEMPLATE_CONF_GLOB",
+        str(target / "antizapret-*-am.conf"),
+    )
+
+    # /etc/wireguard/ips is rebuilt by parse.sh on every doall; format starts
+    # with ", " followed by comma-separated subnets (no /24 prefix).
+    fresh = tmp_path / "wg" / "ips"
+    fresh.parent.mkdir(parents=True)
+    fresh.write_text(", 10.30.0.0/15, 7.8.9.0/24")
+    monkeypatch.setattr(agent, "_RESULT_IPS_PATH", str(fresh))
+
+    # Result combines the antizapret network prefix from *-am.conf
+    # (10.29.8.0/24, doesn't change with toggles) with the fresh subnet list.
+    assert agent._parse_allowed_ips_from_template() == \
+        b"10.29.8.0/24, 10.30.0.0/15, 7.8.9.0/24"
+
+
+def test_parse_allowed_ips_handles_empty_fresh_ips(tmp_path, monkeypatch):
+    target = tmp_path / "client" / "amneziawg" / "antizapret"
+    target.mkdir(parents=True)
+    (target / "antizapret-foo-am.conf").write_text(CONF_FIXTURE)
+    monkeypatch.setattr(
+        agent, "_TEMPLATE_CONF_GLOB",
+        str(target / "antizapret-*-am.conf"),
+    )
+
+    fresh = tmp_path / "ips"
+    fresh.write_text("")  # parse.sh produced an empty list
+    monkeypatch.setattr(agent, "_RESULT_IPS_PATH", str(fresh))
+
+    # Only the prefix remains
+    assert agent._parse_allowed_ips_from_template() == b"10.29.8.0/24"
+
+
+def test_parse_allowed_ips_falls_back_when_no_fresh_ips(tmp_path, monkeypatch):
+    # Early-bootstrap node: *-am.conf exists but parse.sh has not produced
+    # /etc/wireguard/ips yet. Fall back to the legacy *-am.conf parser.
+    target = tmp_path / "client" / "amneziawg" / "antizapret"
+    target.mkdir(parents=True)
+    (target / "antizapret-foo-am.conf").write_text(CONF_FIXTURE)
+    monkeypatch.setattr(
+        agent, "_TEMPLATE_CONF_GLOB",
+        str(target / "antizapret-*-am.conf"),
+    )
+    # _RESULT_IPS_PATH is already a non-existent path via the autouse fixture
     assert agent._parse_allowed_ips_from_template() == \
         b"10.29.8.0/24, 1.2.3.0/24, 4.5.6.0/24"
 
