@@ -160,6 +160,18 @@ else
     print_success "Certbot уже установлен"
 fi
 
+# iptables + iptables-persistent — для DNAT-балансировщика (52443→51443 и т.д.).
+# Backend services/balancer.py:ensure_ports_reconciled пишет правила через `iptables`;
+# netfilter-persistent сохраняет их при reboot. Без этих пакетов балансировщик молча
+# no-op'ит (FileNotFoundError) → клиенты не подключаются.
+if ! command -v iptables-save &> /dev/null; then
+    print_info "Установка iptables и iptables-persistent..."
+    apt-get install -y -qq iptables iptables-persistent netfilter-persistent > /dev/null
+    print_success "iptables установлен"
+else
+    print_success "iptables уже установлен"
+fi
+
 # ── Шаг 2: Ввод параметров ───────────────────────────────────────────────────
 # Ручная установка: задайте переменные вручную
 #   DOMAIN="vpn.yourcompany.com"
