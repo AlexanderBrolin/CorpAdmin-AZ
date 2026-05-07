@@ -142,14 +142,11 @@ export default function LoginPage() {
             </>
           )}
 
-          <div className="mt-6 text-center text-xs text-gray-500">
-            Первый вход: admin / admin
-          </div>
         </div>
 
         <div className="mt-6 text-center text-sm text-gray-600">
           <p>Защищенное подключение</p>
-          <p className="text-xs text-gray-500 mt-1">© 2026 CorpWeb. Powered by AntiZapret VPN</p>
+          <p className="text-xs text-gray-500 mt-1">© 2026 CorpWeb.</p>
         </div>
       </div>
     </div>
