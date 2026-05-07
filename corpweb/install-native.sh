@@ -383,8 +383,8 @@ print_success ".env создан: $INSTALL_DIR/backend/.env"
 
 print_info "Применение миграций БД..."
 cd "$INSTALL_DIR/backend"
-"$INSTALL_DIR/backend/venv/bin/alembic" upgrade head 2>/dev/null || \
-    print_warning "Alembic: часть миграций уже применена"
+"$INSTALL_DIR/backend/venv/bin/alembic" upgrade head || \
+    print_warning "Alembic: часть миграций уже применена (или произошла ошибка — см. вывод выше)"
 print_success "Миграции применены"
 
 print_info "Инициализация БД (admin, системные настройки)..."
