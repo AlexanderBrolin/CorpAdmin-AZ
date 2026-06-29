@@ -154,8 +154,11 @@ def update_user(
 
 
 def update_password(db: Session, user: User, new_password: str) -> User:
-    """Update user password"""
+    """Update user password. Localizes Google users (406-FZ: admin sets a
+    local password so the user can log in without Google OAuth)."""
     user.password_hash = get_password_hash(new_password)
+    if user.auth_provider == "google":
+        user.auth_provider = "local"
     db.commit()
     db.refresh(user)
     return user

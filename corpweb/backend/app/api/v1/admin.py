@@ -140,6 +140,9 @@ async def update_user(
         is_active=data.is_active
     )
 
+    if data.password is not None:
+        crud_user.update_password(db, user, data.password)
+
     return _build_user_response(db, user)
 
 

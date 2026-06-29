@@ -97,6 +97,50 @@ class TestAdminUsers:
         )
         assert response.status_code == 400
 
+    def test_update_user_sets_password(self, client, admin_user, admin_token, regular_user, db):
+        resp = client.put(
+            f"/api/v1/admin/users/{regular_user.id}",
+            headers=auth_header(admin_token),
+            json={"password": "newsecret1"},
+        )
+        assert resp.status_code == 200
+        # authenticate() must now succeed with the new password
+        from app.crud import user as crud_user
+        assert crud_user.authenticate(db, regular_user.email, "newsecret1") is not None
+
+    def test_update_user_password_localizes_google_user(self, client, admin_user, admin_token, db):
+        from app.crud import user as crud_user
+        g = crud_user.create_google_user(db, "ivan@corp.com", "google-sub-123")
+        resp = client.put(
+            f"/api/v1/admin/users/{g.id}",
+            headers=auth_header(admin_token),
+            json={"password": "newsecret1"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["auth_provider"] == "local"
+        assert crud_user.authenticate(db, "ivan@corp.com", "newsecret1") is not None
+
+    def test_update_user_short_password_rejected(self, client, admin_user, admin_token, regular_user):
+        resp = client.put(
+            f"/api/v1/admin/users/{regular_user.id}",
+            headers=auth_header(admin_token),
+            json={"password": "short"},
+        )
+        assert resp.status_code == 422
+
+    def test_update_user_without_password_keeps_hash(self, client, admin_user, admin_token, regular_user, db):
+        before = regular_user.password_hash
+        resp = client.put(
+            f"/api/v1/admin/users/{regular_user.id}",
+            headers=auth_header(admin_token),
+            json={"username": "renamed"},
+        )
+        assert resp.status_code == 200
+        db.refresh(regular_user)
+        assert regular_user.password_hash == before
+        assert regular_user.auth_provider == "local"
+        assert regular_user.username == "renamed"
+
 
 class TestAdminSettings:
     def test_get_settings(self, client, admin_user, admin_token, system_settings):

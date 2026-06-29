@@ -23,6 +23,7 @@ class UserUpdate(BaseModel):
     email: Optional[str] = Field(None, max_length=255)
     username: Optional[str] = Field(None, min_length=2, max_length=50, pattern=r'^[a-zA-Z0-9._-]+$')
     is_active: Optional[bool] = None
+    password: Optional[str] = Field(None, min_length=6, max_length=128)
 
 
 class UserResponse(BaseModel):
