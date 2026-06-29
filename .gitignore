@@ -6,3 +6,7 @@
 
 # Git worktrees (superpowers skill)
 .worktrees/
+
+# Sensitive: account registry with plaintext passwords — NEVER commit
+docs/Реестр аккаунтов.xlsx
+docs/*.xlsx
