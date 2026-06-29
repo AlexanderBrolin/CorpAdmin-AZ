@@ -26,6 +26,7 @@ export interface UserUpdateRequest {
   email?: string
   username?: string
   is_active?: boolean
+  password?: string
 }
 
 export interface UserListResponse {

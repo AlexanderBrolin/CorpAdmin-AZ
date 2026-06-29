@@ -30,6 +30,13 @@ export default function AdminUserDetailPage() {
   const [blockLoading, setBlockLoading] = useState(false)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
+  // Edit-user modal state
+  const [showEdit, setShowEdit] = useState(false)
+  const [editEmail, setEditEmail] = useState('')
+  const [editUsername, setEditUsername] = useState('')
+  const [editPassword, setEditPassword] = useState('')
+  const [saving, setSaving] = useState(false)
+
   // QR state
   const [qrConfig, setQrConfig] = useState<VPNConfig | null>(null)
   const [qrUrl, setQrUrl] = useState<string | null>(null)
@@ -72,6 +79,37 @@ export default function AdminUserDetailPage() {
       setError(message)
     } finally {
       setBlockLoading(false)
+    }
+  }
+
+  const openEdit = () => {
+    if (!user) return
+    setEditEmail(user.email)
+    setEditUsername(user.username)
+    setEditPassword('')
+    setError('')
+    setShowEdit(true)
+  }
+
+  const handleEdit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!userId) return
+    setSaving(true)
+    setError('')
+    try {
+      await adminApi.updateUser(userId, {
+        email: editEmail,
+        username: editUsername,
+        ...(editPassword ? { password: editPassword } : {}),
+      })
+      setShowEdit(false)
+      await loadData()
+    } catch (err: unknown) {
+      const message = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        || 'Ошибка сохранения'
+      setError(message)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -203,26 +241,34 @@ export default function AdminUserDetailPage() {
               </span>
             </div>
           </div>
-          {user.role !== 'admin' && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={handleToggleBlock}
-              disabled={blockLoading}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition disabled:opacity-50 ${
-                user.is_active
-                  ? 'bg-red-50 text-red-700 hover:bg-red-100'
-                  : 'bg-green-50 text-green-700 hover:bg-green-100'
-              }`}
+              onClick={openEdit}
+              className="px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition font-medium"
             >
-              {blockLoading ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : user.is_active ? (
-                <Ban className="w-4 h-4" />
-              ) : (
-                <Unlock className="w-4 h-4" />
-              )}
-              {user.is_active ? 'Заблокировать' : 'Разблокировать'}
+              Редактировать
             </button>
-          )}
+            {user.role !== 'admin' && (
+              <button
+                onClick={handleToggleBlock}
+                disabled={blockLoading}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition disabled:opacity-50 ${
+                  user.is_active
+                    ? 'bg-red-50 text-red-700 hover:bg-red-100'
+                    : 'bg-green-50 text-green-700 hover:bg-green-100'
+                }`}
+              >
+                {blockLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : user.is_active ? (
+                  <Ban className="w-4 h-4" />
+                ) : (
+                  <Unlock className="w-4 h-4" />
+                )}
+                {user.is_active ? 'Заблокировать' : 'Разблокировать'}
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -364,6 +410,39 @@ export default function AdminUserDetailPage() {
                 Откройте приложение <span className="font-medium">AmneziaWG</span> &rarr; «+» &rarr; «Сканировать QR код»
               </p>
             ) : null}
+          </div>
+        </div>
+      )}
+
+      {showEdit && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-4">Редактировать пользователя</h2>
+            <form onSubmit={handleEdit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <input type="email" value={editEmail} onChange={(e) => setEditEmail(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" required />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Логин</label>
+                <input type="text" value={editUsername} onChange={(e) => setEditUsername(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" required />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Новый пароль</label>
+                <input type="password" value={editPassword} onChange={(e) => setEditPassword(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                  placeholder="Оставьте пустым, чтобы не менять" minLength={6} />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowEdit(false)}
+                  className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition font-medium">Отмена</button>
+                <button type="submit" disabled={saving}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg transition font-medium disabled:opacity-50 flex items-center justify-center gap-2">
+                  {saving && <Loader2 className="w-4 h-4 animate-spin" />}Сохранить</button>
+              </div>
+            </form>
           </div>
         </div>
       )}
