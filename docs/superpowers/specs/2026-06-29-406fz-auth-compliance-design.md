@@ -51,10 +51,19 @@ backend → фронт прячет кнопку (`GET /auth/config` вернё�
 хэшем сразу логинится через `POST /auth/login`. После флипа на `local` он ещё и
 сможет сам менять пароль через `/auth/change-password`.
 
-**Frontend:**
-- `src/pages/AdminUserDetailPage.tsx`: в форму редактирования добавить
-  необязательное поле «Новый пароль» (пустое = не менять), слать в `PUT` body.
-- `src/api/admin.ts`: тип `UserUpdate` += `password?: string`.
+**Frontend (важно — формы редактирования юзера сейчас НЕТ):**
+Проверка кода показала: эндпоинт `PUT /users/{id}` существует и `adminApi.updateUser`
+объявлен, но **в UI не вызывается нигде** — есть только модалка *создания*
+(`AdminUsersPage`, паттерн `handleCreate`) и read-only просмотр
+(`AdminUserDetailPage`). Поэтому фронт-часть — это **построить форму
+редактирования юзера**, а не добавить поле в существующую.
+
+- `src/types/index.ts` `UserUpdateRequest`: += `password?: string`.
+- `src/pages/AdminUserDetailPage.tsx`: добавить кнопку «Редактировать» +
+  модалку (по образцу Create-модалки из `AdminUsersPage`) с полями: email,
+  username, «Новый пароль» (необязательное — пустое = не менять). Submit →
+  `adminApi.updateUser(id, {email, username, password?})`, затем перезагрузить
+  карточку юзера. Пустое поле пароля в body не отправляем (или `undefined`).
 
 ## Out of scope (YAGNI)
 - Grace-period / self-service миграция (явно отвергнуто).
