@@ -207,6 +207,12 @@ class TestIpAddr:
         assert m.call_args[0][0] == [
             "ip", "addr", "add", "10.29.8.1/21", "dev", "antizapret",
         ]
+        # check=True is load-bearing: a failed `ip addr add` must raise
+        # CalledProcessError rather than be silently swallowed, or the delete
+        # loop would proceed on an address that was never actually added.
+        assert m.call_args.kwargs["check"] is True
+        assert m.call_args.kwargs["capture_output"] is True
+        assert m.call_args.kwargs["text"] is True
 
     def test_del_invokes_full_argv(self):
         with patch("corpweb_sync_agent.subprocess.run") as m:
@@ -214,6 +220,9 @@ class TestIpAddr:
         assert m.call_args[0][0] == [
             "ip", "addr", "del", "10.29.8.1/24", "dev", "antizapret",
         ]
+        assert m.call_args.kwargs["check"] is True
+        assert m.call_args.kwargs["capture_output"] is True
+        assert m.call_args.kwargs["text"] is True
 
     def test_returns_false_on_command_failure(self):
         err = subprocess.CalledProcessError(2, ["ip"], stderr="boom")
@@ -282,6 +291,86 @@ class TestReconcileOneIface:
         assert ("add", "10.29.8.1/21", "antizapret") in calls[2:]
         # the second delete never happened — only one del in the whole run
         assert [c[0] for c in calls].count("del") == 1
+
+    def test_failed_delete_returns_false_without_further_calls(self):
+        """The delete-fails branch (as opposed to add-fails) was previously
+        unexercised: add succeeds, the single delete fails, and the function
+        must stop right there — no kernel re-read, no further `ip addr` call."""
+        with patch("corpweb_sync_agent._ip_addr", side_effect=[True, False]) as m, \
+             patch("corpweb_sync_agent._iface_state") as state_m:
+            ok = agent._reconcile_one_iface(
+                "antizapret", ["10.29.8.1/24"], ["10.29.8.1/21"],
+            )
+
+        assert ok is False
+        assert [c[0][0] for c in m.call_args_list] == ["add", "del"]
+        state_m.assert_not_called()
+
+    def test_second_delete_causes_collateral_loss_first_does_not(self):
+        """The kernel is re-read after EVERY delete, not just the first: an
+        implementation that only checked once (e.g. after the first delete)
+        would pass test_restores_address_lost_to_promote_secondaries by
+        accident, since that test's collateral loss happens on the very
+        first delete. Here the first delete is clean and only the second
+        one is fatal, so _iface_state must be consulted both times."""
+        calls: list[tuple] = []
+
+        def fake_ip_addr(op, addr, iface):
+            calls.append((op, addr, iface))
+            return True
+
+        with patch("corpweb_sync_agent._ip_addr", side_effect=fake_ip_addr), \
+             patch(
+                 "corpweb_sync_agent._iface_state",
+                 side_effect=[
+                     ["10.29.8.1/21", "10.29.8.2/24"],  # after 1st delete: still fine
+                     [],                                  # after 2nd delete: wanted addr gone
+                 ],
+             ):
+            ok = agent._reconcile_one_iface(
+                "antizapret",
+                ["10.29.8.1/24", "10.29.8.2/24"],
+                ["10.29.8.1/21"],
+            )
+
+        assert ok is False
+        assert calls == [
+            ("add", "10.29.8.1/21", "antizapret"),
+            ("del", "10.29.8.1/24", "antizapret"),
+            ("del", "10.29.8.2/24", "antizapret"),
+            ("add", "10.29.8.1/21", "antizapret"),
+        ]
+
+    def test_unreadable_kernel_after_delete_readds_every_wanted_address(self):
+        """_iface_state returns None for five distinct causes (interface
+        gone, ip missing, non-zero rc, unparsable JSON, non-list payload);
+        in four of them the interface is alive and may have just lost a
+        wanted address to promote_secondaries. Bailing without restoring
+        would leave it short, so every address in `want` is re-added blind —
+        `want` came from the conf and is trustworthy even when the live
+        state is not."""
+        calls: list[tuple] = []
+
+        def fake_ip_addr(op, addr, iface):
+            calls.append((op, addr, iface))
+            return True
+
+        with patch("corpweb_sync_agent._ip_addr", side_effect=fake_ip_addr), \
+             patch("corpweb_sync_agent._iface_state", return_value=None):
+            ok = agent._reconcile_one_iface(
+                "antizapret",
+                ["10.29.8.1/24"],
+                ["10.29.8.1/21", "10.29.16.1/24"],
+            )
+
+        assert ok is False
+        dels = [c for c in calls if c[0] == "del"]
+        assert dels == [("del", "10.29.8.1/24", "antizapret")]
+        readds = calls[calls.index(dels[0]) + 1:]
+        assert set(readds) == {
+            ("add", "10.29.8.1/21", "antizapret"),
+            ("add", "10.29.16.1/24", "antizapret"),
+        }
 
     def test_reports_failure_when_iface_disappears_mid_run(self):
         with patch("corpweb_sync_agent._ip_addr", return_value=True), \

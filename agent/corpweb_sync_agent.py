@@ -724,7 +724,11 @@ def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
     address, and re-reads the kernel after every delete: with
     promote_secondaries off, removing a primary address also removes the
     secondaries in its subnet, so anything wanted that disappears is restored
-    at once and the remaining deletes are abandoned.
+    at once and the remaining deletes are abandoned. If the kernel becomes
+    unreadable right after a delete (interface gone, ip missing, non-zero rc,
+    unparsable JSON, non-list payload), the same restore is attempted blind —
+    every address in ``want`` is re-added, since the live state cannot be
+    trusted but ``want`` (from the conf) still can be.
     """
     live_set, want_set = set(live), set(want)
 
@@ -741,7 +745,10 @@ def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
             return False
         current = _iface_state(iface)
         if current is None:
-            log.error("Lost sight of %s while reconciling its addresses", iface)
+            log.error("Lost sight of %s after removing %s — re-adding every wanted address",
+                      iface, addr)
+            for wanted in sorted(want_set):
+                _ip_addr("add", wanted, iface)
             return False
         missing = want_set - set(current)
         if missing:
