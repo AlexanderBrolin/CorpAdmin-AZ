@@ -712,6 +712,16 @@ class TestReconcileOneIface:
             )
         assert ok is False
 
+    def test_refuses_an_empty_desired_set(self):
+        """Defence in depth for the spec's 'never delete the last address'
+        rail: reconcile_iface_addresses already skips an interface whose conf
+        yields nothing, but the deleting function must not rely on its caller."""
+        with patch("corpweb_sync_agent._ip_addr") as m, \
+             patch("corpweb_sync_agent._iface_state", return_value=[]):
+            ok = agent._reconcile_one_iface("antizapret", ["10.29.8.1/21"], [])
+        assert ok is False
+        m.assert_not_called()
+
     def test_adds_only_when_iface_has_no_addresses(self):
         calls: list[tuple] = []
 
@@ -762,6 +772,11 @@ def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
     Bring one interface's address set to ``want``. Returns True if the kernel
     ends up matching exactly.
 
+    Refuses outright to work against an empty desired set: the caller already
+    skips that case, but the function that issues the deletes must not depend
+    on it — stripping every address off a live interface is the one outcome
+    this code must never produce.
+
     Adds before deleting, so the interface is never momentarily without an
     address, and re-reads the kernel after every delete: with
     promote_secondaries off, removing a primary address also removes the
@@ -769,6 +784,10 @@ def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
     at once and the remaining deletes are abandoned.
     """
     live_set, want_set = set(live), set(want)
+
+    if not want_set:
+        log.error("Refusing to reconcile %s against an empty desired address set", iface)
+        return False
 
     for addr in sorted(want_set - live_set):
         if not _ip_addr("add", addr, iface):
@@ -796,7 +815,7 @@ def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
 - [ ] **Step 4: Прогнать тесты**
 
 Run: `cd agent && python3 -m pytest tests/test_iface_addr_reconcile.py -v`
-Expected: 35 passed.
+Expected: 36 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -996,7 +1015,7 @@ def reconcile_iface_addresses(apply: bool) -> dict:
 - [ ] **Step 4: Прогнать тесты**
 
 Run: `cd agent && python3 -m pytest tests/test_iface_addr_reconcile.py -v`
-Expected: 43 passed.
+Expected: 44 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -1118,8 +1137,8 @@ Expected: FAIL — `reconcile_iface_addresses` не вызывается ни и
 - [ ] **Step 5: Прогнать весь набор агента**
 
 Run: `cd agent && python3 -m pytest tests/ -q`
-Expected: `160 passed` — 112 исходных + 2 из Task 1 + 46 в `test_iface_addr_reconcile.py`
-(15 + 11 + 9 + 8 + 3 по задачам 2–6). Ни одного FAIL и ни одного ERROR.
+Expected: `161 passed` — 112 исходных + 2 из Task 1 + 47 в `test_iface_addr_reconcile.py`
+(15 + 11 + 10 + 8 + 3 по задачам 2–6). Ни одного FAIL и ни одного ERROR.
 Число проверено прогоном на временной копии агента до написания плана.
 
 - [ ] **Step 6: Commit**
@@ -1279,15 +1298,63 @@ Expected: строк `Address drift` нет — обе ноды уже прив�
 Число рукопожатий до и после отличается не больше, чем на естественные колебания
 (единицы), а не в разы.
 
-- [ ] **Step 5: Контролируемая проверка на wgfi4, что сверщик действительно работает**
+- [ ] **Step 5: Выдержка, затем выкатить wgfi4**
+
+Подождать 30–60 минут и убедиться, что wgfi3 живёт нормально: расхождений нет,
+число активных пиров не просело.
+
+```bash
+ssh -p 2201 brolin@168.113.209.218 \
+  'export PGPASSWORD=$(grep -E "^DATABASE_URL" /opt/corpweb/backend/.env \
+     | sed -E "s#.*://[^:]+:([^@]+)@.*#\\1#"); \
+   psql -h localhost -U corpweb -d corpweb_db -c \
+     "SELECT hostname, metrics ? '"'"'iface_addr_drift'"'"' AS has_drift, \
+             metrics->'"'"'iface_addr_drift'"'"' AS drift, \
+             metrics->'"'"'iface_addr_drift_applied_count'"'"' AS fixed, \
+             metrics->'"'"'iface_addr_drift_failed'"'"' AS failed \
+      FROM nodes ORDER BY id;"'
+```
+
+Ожидается: у обеих нод `has_drift = f`, `drift`, `fixed` и `failed` — `NULL`
+(ключи с пустым значением агент не отправляет, поэтому ищем **отсутствие** ключа,
+а не значение `false`).
+
+Затем выкатить wgfi4 тем же способом. ⚠️ На wgfi4 `brolin` имеет **uid 0**, `sudo`
+там не установлен — команды идут без него, в отличие от wgfi3:
+
+```bash
+ssh -J brolin@wgfi-office.p4i.ru:2201 -p 2201 brolin@78.17.39.244 \
+  'wg show antizapret | grep -c "latest handshake"'          # снять до
+
+scp -o "ProxyJump=brolin@wgfi-office.p4i.ru:2201" -P 2201 agent/corpweb_sync_agent.py \
+    brolin@78.17.39.244:/tmp/corpweb_sync_agent.py
+ssh -J brolin@wgfi-office.p4i.ru:2201 -p 2201 brolin@78.17.39.244 \
+  'install -m 0755 /tmp/corpweb_sync_agent.py /usr/local/bin/corpweb-sync-agent.py \
+   && systemctl restart corpweb-sync-agent \
+   && sleep 5 \
+   && journalctl -u corpweb-sync-agent -n 50 --no-pager | grep -iE "address|drift" \
+   && wg show antizapret | grep -c "latest handshake"'       # снять после
+```
+
+Expected: строк `Address drift` нет, число рукопожатий не просело.
+
+- [ ] **Step 6: Контролируемая проверка на wgfi4, что сверщик действительно работает**
+
+Выполняется **после** того, как на wgfi4 уже стоит новый агент (Step 5) — иначе
+проверка гоняла бы старый код и ничего бы не доказала.
 
 ```bash
 ssh -J brolin@wgfi-office.p4i.ru:2201 -p 2201 brolin@78.17.39.244
 # внести заведомо лишний адрес, не пересекающийся ни с одной клиентской подсетью
 ip addr add 10.29.99.1/32 dev antizapret
 ip -4 -br addr show antizapret          # видно два адреса
-# дождаться heartbeat (30 с) и проверить метрику на CP:
-#   psql ... -c "SELECT hostname, metrics->'iface_addr_drift' FROM nodes;"
+```
+
+Дождаться heartbeat (30 с) и посмотреть метрику на CP — той же командой, что в Step 5.
+Ожидается `has_drift = t` и в `drift` виден лишний `10.29.99.1/32`.
+
+```bash
+# снова на wgfi4
 systemctl restart corpweb-sync-agent
 sleep 10
 ip -4 -br addr show antizapret          # ожидается только 10.29.8.1/21
@@ -1295,7 +1362,7 @@ ip -4 -br addr show antizapret          # ожидается только 10.29.
 
 Expected: до рестарта метрика `iface_addr_drift` показывает лишний адрес; после — интерфейс чист, `iface_addr_drift_applied_count = 1`, число пиров с рукопожатием не просело.
 
-- [ ] **Step 6: Закрыть задачи**
+- [ ] **Step 7: Закрыть задачи**
 
 ```bash
 bd close CorpAdmin-AZ-c9w --reason "Reconciler shipped and verified on wgfi3/wgfi4"
