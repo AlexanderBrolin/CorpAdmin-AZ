@@ -10,6 +10,11 @@
 
 **Spec:** [docs/superpowers/specs/2026-09-02-iface-address-reconcile-design.md](../specs/2026-09-02-iface-address-reconcile-design.md)
 
+**Статус проверки:** весь код из задач 1–6 (реализация и тесты) прогнан на временной копии
+`agent/` вне репозитория — 160 тестов зелёные, включая все 112 существующих. То есть план
+содержит проверенно работающий код, а не намерение. Копия удалена; реализация выполняется
+заново по TDD, тест за тестом.
+
 ## Global Constraints
 
 - **Не трогать `apply_path()` и `apply_iface_conf()`.** Это общий путь всех 14 managed-файлов; его изменение вне объёма (спека, Non-goals).
@@ -18,6 +23,14 @@
 - **Сверщик никогда не выпускает исключение наружу.** Любая ошибка → `log.error` + метрика.
 - **Порядок в `startup_reconcile()` фиксирован:** сверщик вызывается **после** цикла `apply_path()`. Раньше — приведёт интерфейс к устаревшему локальному файлу.
 - **Тесты — pytest-классы без `unittest.TestCase`**, ассерты на полный `argv`.
+- **Осознанное отступление от конвенции тестов.** Существующие файлы подделывают результат
+  `subprocess.run` через `MagicMock(returncode=0, stderr="")`. Здесь используется настоящий
+  `subprocess.CompletedProcess` (хелпер `_completed`). Причина: `MagicMock` возвращает
+  объект на **любой** атрибут, поэтому опечатка в реализации (`.stdou` вместо `.stdout`)
+  дала бы зелёный тест на неработающем коде. Для изменения, которое трогает сетевые
+  интерфейсы прод-нод, ложно-зелёный недопустим. Файл и без того смешивает стили —
+  в `test_seed_blob.py` используется настоящий `CalledProcessError`, в
+  `test_sync_agent.py` — вручную собранные объекты результата.
 - **Язык:** код, комментарии, docstring'и и сообщения коммитов — английский.
 - **TDD обязателен:** тест пишется первым, запускается и падает по правильной причине, только затем реализация.
 - **Деплой на прод — только после merge в `CorpAdmin`.** Task 8 выполняется отдельно от Task 1–7.
@@ -287,6 +300,18 @@ class TestIfaceState:
         with patch("corpweb_sync_agent._ip_addr_show", return_value=None):
             assert agent._iface_state("antizapret") is None
 
+    def test_json_object_instead_of_array_returns_none(self):
+        """Valid JSON of the wrong shape must not be read as 'no addresses' —
+        that would look like an interface to be filled in."""
+        with patch("corpweb_sync_agent._ip_addr_show",
+                   return_value=_completed(0, '{"ifname": "antizapret"}')):
+            assert agent._iface_state("antizapret") is None
+
+    def test_entries_that_are_not_objects_are_skipped(self):
+        with patch("corpweb_sync_agent._ip_addr_show",
+                   return_value=_completed(0, '["nonsense"]')):
+            assert agent._iface_state("antizapret") == []
+
 
 class TestIfaceIsUpContract:
     """_iface_is_up keys off the return code only. If it ever keyed off the
@@ -415,7 +440,7 @@ def _iface_state(iface: str) -> list[str] | None:
 - [ ] **Step 5: Прогнать тесты**
 
 Run: `cd agent && python3 -m pytest tests/test_iface_addr_reconcile.py -v`
-Expected: 13 passed.
+Expected: 15 passed.
 
 Затем регрессия на существующем контракте:
 Run: `cd agent && python3 -m pytest tests/test_sync_agent.py -q`
@@ -560,7 +585,7 @@ def _conf_addresses(conf_path: str) -> list[str]:
 - [ ] **Step 4: Прогнать тесты**
 
 Run: `cd agent && python3 -m pytest tests/test_iface_addr_reconcile.py -v`
-Expected: 24 passed.
+Expected: 26 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -771,7 +796,7 @@ def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
 - [ ] **Step 4: Прогнать тесты**
 
 Run: `cd agent && python3 -m pytest tests/test_iface_addr_reconcile.py -v`
-Expected: 33 passed.
+Expected: 35 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -971,7 +996,7 @@ def reconcile_iface_addresses(apply: bool) -> dict:
 - [ ] **Step 4: Прогнать тесты**
 
 Run: `cd agent && python3 -m pytest tests/test_iface_addr_reconcile.py -v`
-Expected: 41 passed.
+Expected: 43 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -1093,8 +1118,9 @@ Expected: FAIL — `reconcile_iface_addresses` не вызывается ни и
 - [ ] **Step 5: Прогнать весь набор агента**
 
 Run: `cd agent && python3 -m pytest tests/ -q`
-Expected: `158 passed` — 112 исходных + 2 из Task 1 + 44 в `test_iface_addr_reconcile.py`
-(13 + 11 + 9 + 8 + 3 по задачам 2–6). Ни одного FAIL и ни одного ERROR.
+Expected: `160 passed` — 112 исходных + 2 из Task 1 + 46 в `test_iface_addr_reconcile.py`
+(15 + 11 + 9 + 8 + 3 по задачам 2–6). Ни одного FAIL и ни одного ERROR.
+Число проверено прогоном на временной копии агента до написания плана.
 
 - [ ] **Step 6: Commit**
 
@@ -1202,7 +1228,7 @@ Expected: агент — все зелёные; backend — `354 passed` (не �
 - [ ] **Step 2: Убедиться, что запрещённые файлы не изменены**
 
 ```bash
-git diff main...HEAD -- agent/corpweb_sync_agent.py | grep -E "^[-+].*def (apply_path|apply_iface_conf)" || echo "OK: apply_path/apply_iface_conf untouched"
+git diff CorpAdmin...HEAD -- agent/corpweb_sync_agent.py | grep -E "^[-+].*def (apply_path|apply_iface_conf)" || echo "OK: apply_path/apply_iface_conf untouched"
 ```
 
 Expected: `OK: ...`. Если строки нашлись — Global Constraints нарушены, откатить.
@@ -1214,17 +1240,44 @@ Expected: `OK: ...`. Если строки нашлись — Global Constraints
 
 - [ ] **Step 4: Выкатить агента на wgfi3 (одну ноду), в непиковое время**
 
+Сначала убедиться, что мы **не** в feature-ветке — деплой из неё запрещён:
+
 ```bash
-# с CP, где лежит дистрибутив агента
-ssh -p 2201 brolin@168.113.209.218
-# обновить /opt/corpweb/agent из репозитория, затем на ноде:
-ssh -J brolin@wgfi-office.p4i.ru:2201 -p 2201 brolin@89.125.26.93
-sudo systemctl restart corpweb-sync-agent
-sudo journalctl -u corpweb-sync-agent -n 50 --no-pager | grep -i "address"
+git rev-parse --abbrev-ref HEAD    # должно быть CorpAdmin
 ```
 
-Expected: строк `Address drift` нет — обе ноды уже приведены хотфиксом. Клиенты не разорваны:
-`sudo wg show antizapret | grep -c "latest handshake"` до и после — расхождение не более естественных колебаний.
+Обновить дистрибутив на CP (`docs/ADD-NODE.md`, раздел «Убедиться, что CP раздаёт
+актуального агента» — этот каталог живёт отдельно от репозитория и легко отстаёт):
+
+```bash
+sha256sum agent/corpweb_sync_agent.py
+ssh -p 2201 brolin@168.113.209.218 'sha256sum /opt/corpweb/agent/corpweb_sync_agent.py'
+# расходятся — обновить:
+scp -P 2201 agent/corpweb_sync_agent.py \
+    brolin@168.113.209.218:/opt/corpweb/agent/corpweb_sync_agent.py
+```
+
+Затем обновить одну ноду — wgfi3, в непиковое время. Юнит запускает
+`/usr/local/bin/corpweb-sync-agent`, который исполняет
+`/usr/local/bin/corpweb-sync-agent.py`:
+
+```bash
+ssh -J brolin@wgfi-office.p4i.ru:2201 -p 2201 brolin@89.125.26.93 \
+  'sudo wg show antizapret | grep -c "latest handshake"'      # снять до
+
+scp -o "ProxyJump=brolin@wgfi-office.p4i.ru:2201" -P 2201 agent/corpweb_sync_agent.py \
+    brolin@89.125.26.93:/tmp/corpweb_sync_agent.py
+ssh -J brolin@wgfi-office.p4i.ru:2201 -p 2201 brolin@89.125.26.93 \
+  'sudo install -m 0755 /tmp/corpweb_sync_agent.py /usr/local/bin/corpweb-sync-agent.py \
+   && sudo systemctl restart corpweb-sync-agent \
+   && sleep 5 \
+   && sudo journalctl -u corpweb-sync-agent -n 50 --no-pager | grep -iE "address|drift" \
+   && sudo wg show antizapret | grep -c "latest handshake"'   # снять после
+```
+
+Expected: строк `Address drift` нет — обе ноды уже приведены хотфиксом 2026-09-02.
+Число рукопожатий до и после отличается не больше, чем на естественные колебания
+(единицы), а не в разы.
 
 - [ ] **Step 5: Контролируемая проверка на wgfi4, что сверщик действительно работает**
 
@@ -1270,4 +1323,16 @@ bd close CorpAdmin-AZ-3f9 --reason "Root cause fixed in the agent; runbook prefl
 
 **Согласованность имён.** `_ip_addr_show`, `_iface_is_up`, `_iface_state`, `_conf_addresses`, `_ip_addr`, `_reconcile_one_iface`, `reconcile_iface_addresses`, `_IFACE_CONFS`, `_IFACES`, `_ADDR_RECONCILE_MAX_FAILURES`, `_addr_reconcile_failures`, `_addr_reconcile_applied_total` — во всех задачах и тестах написаны одинаково. Ключи метрик: `iface_addr_drift_detected`, `iface_addr_drift`, `iface_addr_drift_applied_count`, `iface_addr_drift_failed`, `iface_addr_error`.
 
-**Плейсхолдеров нет.** Каждый шаг содержит исполнимый код или команду с ожидаемым результатом.
+**Плейсхолдеров нет.** Каждый шаг содержит исполнимый код или команду с ожидаемым
+результатом. Второй проход убрал последний размытый шаг — «обновить `/opt/corpweb/agent`
+из репозитория» в Task 8 заменён на конкретные команды с реальными путями
+(`/opt/corpweb/agent/corpweb_sync_agent.py` на CP, `/usr/local/bin/corpweb-sync-agent.py`
+на ноде — оба проверены на живых машинах).
+
+**Что ещё исправил второй проход:**
+
+- добавлены два теста на битую форму вывода `ip -j` (валидный JSON, но не массив;
+  элементы не-объекты) — ветки `isinstance` в `_iface_state` были реализованы, но не покрыты;
+- ожидаемые числа тестов пересчитаны по фактическому прогону: 15 / 26 / 35 / 43 / 160;
+- страховочная проверка в Task 8 сравнивала с `main`, хотя работа ведётся от `CorpAdmin` —
+  на `main` диапазон дал бы посторонние изменения.
