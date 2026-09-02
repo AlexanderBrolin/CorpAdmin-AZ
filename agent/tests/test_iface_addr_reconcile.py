@@ -403,3 +403,91 @@ class TestReconcileOneIface:
 
         assert ok is True
         assert calls == [("add", "10.29.8.1/21", "antizapret")]
+
+
+ONE_IFACE = {"antizapret": "/etc/wireguard/antizapret.conf"}
+
+
+class TestReconcileIfaceAddresses:
+    def test_no_drift_runs_no_commands(self):
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._ip_addr") as m:
+            metrics = agent.reconcile_iface_addresses(apply=True)
+        m.assert_not_called()
+        assert metrics == {}
+
+    def test_drift_is_fixed_and_counted(self):
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/24"]), \
+             patch("corpweb_sync_agent._reconcile_one_iface", return_value=True) as m:
+            metrics = agent.reconcile_iface_addresses(apply=True)
+        m.assert_called_once_with("antizapret", ["10.29.8.1/24"], ["10.29.8.1/21"])
+        assert metrics["iface_addr_drift_detected"] is True
+        assert metrics["iface_addr_drift"] == {
+            "antizapret": {"live": ["10.29.8.1/24"], "want": ["10.29.8.1/21"]},
+        }
+        assert metrics["iface_addr_drift_applied_count"] == 1
+
+    def test_detect_only_never_mutates(self):
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/24"]), \
+             patch("corpweb_sync_agent._reconcile_one_iface") as m:
+            metrics = agent.reconcile_iface_addresses(apply=False)
+        m.assert_not_called()
+        assert metrics["iface_addr_drift_detected"] is True
+        assert "iface_addr_drift_applied_count" not in metrics
+
+    def test_absent_iface_is_skipped(self):
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._iface_state", return_value=None), \
+             patch("corpweb_sync_agent._reconcile_one_iface") as m:
+            metrics = agent.reconcile_iface_addresses(apply=True)
+        m.assert_not_called()
+        assert metrics == {}
+
+    def test_unknown_desired_state_is_skipped(self):
+        """No Address in the conf means we do not know what the interface
+        should hold — never mutate on a guess."""
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=[]), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/24"]), \
+             patch("corpweb_sync_agent._reconcile_one_iface") as m:
+            metrics = agent.reconcile_iface_addresses(apply=True)
+        m.assert_not_called()
+        assert metrics == {}
+
+    def test_backoff_stops_retrying_after_three_failures(self):
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/24"]), \
+             patch("corpweb_sync_agent._reconcile_one_iface", return_value=False) as m:
+            for _ in range(3):
+                agent.reconcile_iface_addresses(apply=True)
+            assert m.call_count == 3
+            metrics = agent.reconcile_iface_addresses(apply=True)
+
+        assert m.call_count == 3, "fourth pass must not touch the interface"
+        assert metrics["iface_addr_drift_failed"] is True
+        assert metrics["iface_addr_drift_detected"] is True
+
+    def test_success_resets_the_failure_counter(self):
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/24"]), \
+             patch("corpweb_sync_agent._reconcile_one_iface", side_effect=[False, True]):
+            agent.reconcile_iface_addresses(apply=True)
+            assert agent._addr_reconcile_failures["antizapret"] == 1
+            agent.reconcile_iface_addresses(apply=True)
+
+        assert agent._addr_reconcile_failures.get("antizapret", 0) == 0
+
+    def test_unexpected_error_is_contained(self):
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", side_effect=RuntimeError("boom")):
+            metrics = agent.reconcile_iface_addresses(apply=True)
+        assert metrics["iface_addr_drift_failed"] is True

@@ -762,6 +762,71 @@ def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
     return final is not None and set(final) == want_set
 
 
+def reconcile_iface_addresses(apply: bool) -> dict:
+    """
+    Compare each managed interface's live IPv4 addresses against its conf and,
+    when ``apply`` is set, bring the kernel into line. Returns heartbeat
+    metrics describing what was found.
+
+    An interface is only touched when it exists and its conf yields at least
+    one address: without a trustworthy desired state we never mutate a live
+    interface. ``iface_addr_drift`` reports what the pass found, whether or not
+    the pass then fixed it; ``iface_addr_drift_applied_count`` says how many
+    fixes this process has made.
+
+    Never raises — the heartbeat must survive any failure here.
+    """
+    global _addr_reconcile_applied_total
+
+    drift: dict = {}
+    failed = False
+
+    for iface, conf_path in _IFACE_CONFS.items():
+        try:
+            want = _conf_addresses(conf_path)
+            if not want:
+                continue
+            live = _iface_state(iface)
+            if live is None:
+                continue
+            if set(live) == set(want):
+                _addr_reconcile_failures.pop(iface, None)
+                continue
+
+            drift[iface] = {"live": sorted(live), "want": sorted(want)}
+            if not apply:
+                continue
+
+            if _addr_reconcile_failures.get(iface, 0) >= _ADDR_RECONCILE_MAX_FAILURES:
+                log.error("Address drift on %s persists after %d attempts — not retrying",
+                          iface, _ADDR_RECONCILE_MAX_FAILURES)
+                failed = True
+                continue
+
+            log.warning("Address drift on %s: live=%s want=%s — reconciling",
+                        iface, sorted(live), sorted(want))
+            if _reconcile_one_iface(iface, live, want):
+                _addr_reconcile_applied_total += 1
+                _addr_reconcile_failures.pop(iface, None)
+            else:
+                _addr_reconcile_failures[iface] = _addr_reconcile_failures.get(iface, 0) + 1
+                if _addr_reconcile_failures[iface] >= _ADDR_RECONCILE_MAX_FAILURES:
+                    failed = True
+        except Exception as exc:  # defensive — the heartbeat must not break
+            log.error("Address reconcile failed for %s: %s", iface, exc)
+            failed = True
+
+    metrics: dict = {}
+    if drift:
+        metrics["iface_addr_drift_detected"] = True
+        metrics["iface_addr_drift"] = drift
+    if _addr_reconcile_applied_total:
+        metrics["iface_addr_drift_applied_count"] = _addr_reconcile_applied_total
+    if failed:
+        metrics["iface_addr_drift_failed"] = True
+    return metrics
+
+
 def apply_iface_conf(iface: str, flavor: str) -> None:
     """
     Bring iface up (if it doesn't exist yet) or syncconf it (if it already
