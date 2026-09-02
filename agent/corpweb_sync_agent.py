@@ -1077,6 +1077,11 @@ def startup_reconcile() -> None:
         except (requests.ConnectionError, KeyError) as exc:
             log.warning("Failed to fetch %s: %s", path, exc)
 
+    # The confs on disk are now the CP's version, which is the only reason the
+    # conf can be trusted as the desired interface state. Reconciling before
+    # the loop above would enforce a stale local file.
+    reconcile_iface_addresses(apply=True)
+
     # Push node-side ground truth back to CP (CorpAdmin-AZ-byc).
     # blob_path is the canonical key CP stores under — independent of where
     # the parser reads from (monkeypatched _SETUP_PATH in tests, real path in prod).
@@ -1215,6 +1220,13 @@ def send_heartbeat() -> None:
         log.error("sync_escape_rules unexpectedly raised: %s", exc)
         escape_metrics = {"escape_error": f"unexpected: {exc.__class__.__name__}"}
     metrics.update(escape_metrics)
+
+    try:
+        addr_metrics = reconcile_iface_addresses(apply=False)
+    except Exception as exc:  # defensive — mirrors the sync_escape_rules guard
+        log.error("reconcile_iface_addresses unexpectedly raised: %s", exc)
+        addr_metrics = {"iface_addr_error": f"unexpected: {exc.__class__.__name__}"}
+    metrics.update(addr_metrics)
 
     payload = {
         "applied_sha": _applied_shas(),

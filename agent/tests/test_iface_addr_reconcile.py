@@ -8,11 +8,12 @@ compares the kernel against the conf and fixes it in place.
 """
 from __future__ import annotations
 
+import base64
 import json
 import pathlib
 import subprocess
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -566,3 +567,55 @@ class TestReconcileIfaceAddresses:
             "live": ["10.29.16.1/21"], "want": ["10.29.16.1/24"],
         }
         assert metrics["iface_addr_drift_failed"] is True
+
+
+class TestIntegration:
+    def test_startup_reconcile_applies_after_every_file_was_applied(self):
+        """Order matters: the conf only holds the CP's version once apply_path
+        has run for it. Reconciling earlier would enforce a stale local file,
+        so the reconcile must come after ALL of them — not after the first."""
+        order: list[str] = []
+
+        response = MagicMock()
+        response.json.return_value = {"content": base64.b64encode(b"x").decode()}
+
+        with patch("corpweb_sync_agent.api_get", return_value=response), \
+             patch("corpweb_sync_agent.apply_path",
+                   side_effect=lambda *a, **k: order.append("apply_path")), \
+             patch("corpweb_sync_agent._parse_allowed_ips_from_template", return_value=None), \
+             patch("corpweb_sync_agent._read_setup", return_value=None), \
+             patch("corpweb_sync_agent.reconcile_iface_addresses",
+                   side_effect=lambda apply: order.append(f"reconcile(apply={apply})") or {}):
+            agent.startup_reconcile()
+
+        assert order.count("apply_path") == len(agent.MANAGED_FILES)
+        assert order.count("reconcile(apply=True)") == 1
+        assert order[-1] == "reconcile(apply=True)", (
+            "the reconcile must run after the whole file loop"
+        )
+
+    def test_heartbeat_reports_drift_without_applying(self):
+        with patch("corpweb_sync_agent.collect_metrics", return_value={}), \
+             patch("corpweb_sync_agent.collect_peers", return_value=[]), \
+             patch("corpweb_sync_agent.sync_escape_rules", return_value={}), \
+             patch("corpweb_sync_agent._applied_shas", return_value={}), \
+             patch("corpweb_sync_agent.reconcile_iface_addresses",
+                   return_value={"iface_addr_drift_detected": True}) as rec, \
+             patch("corpweb_sync_agent.api_post") as post:
+            agent.send_heartbeat()
+
+        rec.assert_called_once_with(apply=False)
+        assert post.call_args[0][1]["metrics"]["iface_addr_drift_detected"] is True
+
+    def test_heartbeat_survives_a_raising_reconciler(self):
+        with patch("corpweb_sync_agent.collect_metrics", return_value={}), \
+             patch("corpweb_sync_agent.collect_peers", return_value=[]), \
+             patch("corpweb_sync_agent.sync_escape_rules", return_value={}), \
+             patch("corpweb_sync_agent._applied_shas", return_value={}), \
+             patch("corpweb_sync_agent.reconcile_iface_addresses",
+                   side_effect=RuntimeError("boom")), \
+             patch("corpweb_sync_agent.api_post") as post:
+            agent.send_heartbeat()
+
+        metrics = post.call_args[0][1]["metrics"]
+        assert metrics["iface_addr_error"].startswith("unexpected: RuntimeError")
