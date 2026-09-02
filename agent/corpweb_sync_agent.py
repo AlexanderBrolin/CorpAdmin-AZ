@@ -581,17 +581,73 @@ def apply_wg_syncconf(iface: str) -> None:
         )
 
 
-def _iface_is_up(iface: str) -> bool:
-    """Return True if the network iface currently exists in the kernel."""
+# Consecutive failed reconcile attempts per interface, and the number of
+# successful reconciles this process has performed. startup_reconcile() runs on
+# every SSE reconnect, so a fix that refuses to stick must stop being retried
+# rather than hammer a production interface in a loop.
+_ADDR_RECONCILE_MAX_FAILURES = 3
+_addr_reconcile_failures: dict[str, int] = {}
+_addr_reconcile_applied_total = 0
+
+
+def _ip_addr_show(iface: str) -> subprocess.CompletedProcess | None:
+    """
+    Run ``ip -j -4 addr show dev <iface>``.
+
+    Returns the completed process, or None if the ip binary is missing.
+    Callers distinguish three outcomes: a non-zero return code (the interface
+    does not exist), rc 0 with an empty JSON array (it exists but carries no
+    IPv4 address), and rc 0 with an entry.
+    """
     try:
-        result = subprocess.run(
-            ["ip", "link", "show", iface],
+        return subprocess.run(
+            ["ip", "-j", "-4", "addr", "show", "dev", iface],
             capture_output=True,
             text=True,
         )
-        return result.returncode == 0
     except FileNotFoundError:
-        return False
+        return None
+
+
+def _iface_is_up(iface: str) -> bool:
+    """Return True if the network iface currently exists in the kernel."""
+    result = _ip_addr_show(iface)
+    return result is not None and result.returncode == 0
+
+
+def _iface_state(iface: str) -> list[str] | None:
+    """
+    Return the iface's global IPv4 addresses as ``<ip>/<prefixlen>`` strings.
+
+    None means there is no usable answer — the interface does not exist, the ip
+    binary is missing, or the output did not parse. An empty list means the
+    interface exists but has no IPv4 address, which is a state the reconciler
+    corrects rather than skips.
+    """
+    result = _ip_addr_show(iface)
+    if result is None or result.returncode != 0:
+        return None
+    try:
+        entries = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        log.error("Could not parse `ip -j -4 addr show dev %s` output", iface)
+        return None
+    if not isinstance(entries, list):
+        log.error("Unexpected `ip -j` payload for %s: %r", iface, type(entries))
+        return None
+
+    addresses: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for info in entry.get("addr_info", []):
+            if info.get("family") != "inet" or info.get("scope") != "global":
+                continue
+            local, prefixlen = info.get("local"), info.get("prefixlen")
+            if local is None or prefixlen is None:
+                continue
+            addresses.append(f"{local}/{prefixlen}")
+    return addresses
 
 
 def apply_iface_conf(iface: str, flavor: str) -> None:
