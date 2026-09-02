@@ -1077,9 +1077,12 @@ def startup_reconcile() -> None:
         except (requests.ConnectionError, KeyError) as exc:
             log.warning("Failed to fetch %s: %s", path, exc)
 
-    # The confs on disk are now the CP's version, which is the only reason the
-    # conf can be trusted as the desired interface state. Reconciling before
-    # the loop above would enforce a stale local file.
+    # Only safe here, after the loop: the confs on disk are the control plane's
+    # version as of the last successful fetch. When the CP is unreachable every
+    # fetch above failed and this falls back to the last known good conf, which
+    # is still the right target — after provisioning the agent is that file's
+    # only writer. Reconciling before the loop would enforce a conf the CP had
+    # already superseded.
     reconcile_iface_addresses(apply=True)
 
     # Push node-side ground truth back to CP (CorpAdmin-AZ-byc).

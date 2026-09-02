@@ -16,6 +16,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 # Make the agent package importable (agent/ is a sibling of tests/)
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -593,6 +594,21 @@ class TestIntegration:
         assert order[-1] == "reconcile(apply=True)", (
             "the reconcile must run after the whole file loop"
         )
+
+    def test_startup_reconcile_still_applies_when_every_fetch_fails(self):
+        """F1 fix round 1: when the CP is unreachable, every api_get in the
+        loop raises and is caught per-file — the reconcile must still run
+        against the last-known-good local conf. Skipping it here would mean
+        declining to fix drift during exactly the outage this plan targets."""
+        with patch("corpweb_sync_agent.api_get",
+                   side_effect=requests.ConnectionError("CP unreachable")), \
+             patch("corpweb_sync_agent._parse_allowed_ips_from_template", return_value=None), \
+             patch("corpweb_sync_agent._read_setup", return_value=None), \
+             patch("corpweb_sync_agent.reconcile_iface_addresses",
+                   return_value={}) as rec:
+            agent.startup_reconcile()
+
+        rec.assert_called_once_with(apply=True)
 
     def test_heartbeat_reports_drift_without_applying(self):
         with patch("corpweb_sync_agent.collect_metrics", return_value={}), \
