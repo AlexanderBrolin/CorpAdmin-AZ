@@ -95,6 +95,17 @@ MANAGED_FILES: list[tuple[str, str | None]] = [
 
 MANAGED_PATHS: set[str] = {p for p, _ in MANAGED_FILES}
 
+# Interface → wg-quick / awg-quick conf path. Single definition of the set of
+# interfaces the agent manages: _IFACES is derived from it, _apply_wg_config()
+# patches these files, and reconcile_iface_addresses() compares them against
+# the kernel.
+_IFACE_CONFS: dict[str, str] = {
+    "antizapret": "/etc/wireguard/antizapret.conf",
+    "vpn": "/etc/wireguard/vpn.conf",
+    "az_escape": "/etc/amnezia/amneziawg/az_escape.conf",
+    "vpn_escape": "/etc/amnezia/amneziawg/vpn_escape.conf",
+}
+
 # ---------------------------------------------------------------------------
 # Escape-rules extension (via upstream custom-up.sh / custom-down.sh hooks)
 # ---------------------------------------------------------------------------
@@ -775,63 +786,25 @@ def register_if_needed() -> None:
 
 def _apply_wg_config(cfg: dict) -> None:
     """Patch [Interface] section in WG conf files with CP-provided config."""
-    iface_map = {
-        "antizapret": {
-            "conf": "/etc/wireguard/antizapret.conf",
-            "address": cfg.get("antizapret_address"),
-            "port": cfg.get("antizapret_listen_port"),
-        },
-        "vpn": {
-            "conf": "/etc/wireguard/vpn.conf",
-            "address": cfg.get("vpn_address"),
-            "port": cfg.get("vpn_listen_port"),
-        },
-        "az_escape": {
-            "conf": "/etc/amnezia/amneziawg/az_escape.conf",
-            "address": cfg.get("az_escape_address"),
-            "port": cfg.get("az_escape_listen_port"),
-        },
-        "vpn_escape": {
-            "conf": "/etc/amnezia/amneziawg/vpn_escape.conf",
-            "address": cfg.get("vpn_escape_address"),
-            "port": cfg.get("vpn_escape_listen_port"),
-        },
-    }
     mtu = cfg.get("mtu")
 
-    for iface, params in iface_map.items():
-        conf_path = params["conf"]
+    for iface, conf_path in _IFACE_CONFS.items():
         if not os.path.exists(conf_path):
             continue
 
         content = open(conf_path).read()
         changed = False
 
-        if params["address"]:
-            import re
+        for key, value in (
+            ("Address", cfg.get(f"{iface}_address")),
+            ("ListenPort", cfg.get(f"{iface}_listen_port")),
+            ("MTU", mtu),
+        ):
+            if not value:
+                continue
             new_content = re.sub(
-                r'^Address\s*=\s*.*$',
-                f'Address = {params["address"]}',
-                content, flags=re.MULTILINE,
-            )
-            if new_content != content:
-                content = new_content
-                changed = True
-
-        if params["port"]:
-            new_content = re.sub(
-                r'^ListenPort\s*=\s*.*$',
-                f'ListenPort = {params["port"]}',
-                content, flags=re.MULTILINE,
-            )
-            if new_content != content:
-                content = new_content
-                changed = True
-
-        if mtu:
-            new_content = re.sub(
-                r'^MTU\s*=\s*.*$',
-                f'MTU = {mtu}',
+                rf"^{key}\s*=\s*.*$",
+                f"{key} = {value}",
                 content, flags=re.MULTILINE,
             )
             if new_content != content:
@@ -884,10 +857,11 @@ def startup_reconcile() -> None:
 # ---------------------------------------------------------------------------
 
 # Ordered tuple of WireGuard / AmneziaWG ifaces the agent monitors for peer
-# activity. The first two are the baseline; the last two host escape-mode
+# activity. Derived from _IFACE_CONFS so the managed interface set has exactly
+# one definition. The first two are the baseline; the last two host escape-mode
 # (bypass) tunnels. collect_metrics() emits one active_peers_<iface> key per
 # entry; collect_peers() iterates this tuple when dumping peer state.
-_IFACES: tuple[str, ...] = ("antizapret", "vpn", "az_escape", "vpn_escape")
+_IFACES: tuple[str, ...] = tuple(_IFACE_CONFS)
 
 # AmneziaWG ifaces require the 'awg' CLI; WireGuard ifaces use 'wg'. They are
 # otherwise drop-in compatible (same dump/latest-handshakes format).
