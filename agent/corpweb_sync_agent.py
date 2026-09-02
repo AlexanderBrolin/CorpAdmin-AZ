@@ -772,7 +772,11 @@ def reconcile_iface_addresses(apply: bool) -> dict:
     one address: without a trustworthy desired state we never mutate a live
     interface. ``iface_addr_drift`` reports what the pass found, whether or not
     the pass then fixed it; ``iface_addr_drift_applied_count`` says how many
-    fixes this process has made.
+    fixes this process has made. ``iface_addr_drift_failed`` is reported on
+    every pass, ``apply`` or not: only the detect-only pass's metrics reach
+    the control plane, so a saturated interface (three failed fix attempts)
+    must still surface as failed when merely detecting, or nothing would ever
+    tell a human it gave up retrying.
 
     Never raises — the heartbeat must survive any failure here.
     """
@@ -794,13 +798,15 @@ def reconcile_iface_addresses(apply: bool) -> dict:
                 continue
 
             drift[iface] = {"live": sorted(live), "want": sorted(want)}
-            if not apply:
-                continue
 
             if _addr_reconcile_failures.get(iface, 0) >= _ADDR_RECONCILE_MAX_FAILURES:
-                log.error("Address drift on %s persists after %d attempts — not retrying",
-                          iface, _ADDR_RECONCILE_MAX_FAILURES)
                 failed = True
+                if apply:
+                    log.error("Address drift on %s persists after %d attempts — not retrying",
+                              iface, _ADDR_RECONCILE_MAX_FAILURES)
+                continue
+
+            if not apply:
                 continue
 
             log.warning("Address drift on %s: live=%s want=%s — reconciling",

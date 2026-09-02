@@ -407,6 +407,11 @@ class TestReconcileOneIface:
 
 ONE_IFACE = {"antizapret": "/etc/wireguard/antizapret.conf"}
 
+TWO_IFACES = {
+    "antizapret": "/etc/wireguard/antizapret.conf",
+    "vpn": "/etc/wireguard/vpn.conf",
+}
+
 
 class TestReconcileIfaceAddresses:
     def test_no_drift_runs_no_commands(self):
@@ -417,6 +422,18 @@ class TestReconcileIfaceAddresses:
             metrics = agent.reconcile_iface_addresses(apply=True)
         m.assert_not_called()
         assert metrics == {}
+
+    def test_clean_match_resets_the_failure_counter(self):
+        """F2 fix round 1: a prior run left a failure count on this
+        interface; once live matches want again, the counter must be
+        cleared or the interface would falsely count towards the
+        three-strikes backoff on a later, unrelated drift."""
+        agent._addr_reconcile_failures["antizapret"] = 2
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/21"]):
+            agent.reconcile_iface_addresses(apply=True)
+        assert agent._addr_reconcile_failures.get("antizapret", 0) == 0
 
     def test_drift_is_fixed_and_counted(self):
         with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
@@ -432,14 +449,32 @@ class TestReconcileIfaceAddresses:
         assert metrics["iface_addr_drift_applied_count"] == 1
 
     def test_detect_only_never_mutates(self):
+        """F3 fix round 1: pin the 'the heartbeat can never mutate an
+        interface' guarantee at the subprocess layer rather than by mocking
+        _reconcile_one_iface — the old version of this test would still pass
+        if some future edit added a mutating call anywhere else on the
+        detect-only path. _iface_state runs for real here, fed by a mocked
+        `ip -j -4 addr show` that reports drift; every subprocess.run call
+        this pass makes must be that same read-only show command."""
+        live_json = json.dumps([{
+            "ifname": "antizapret",
+            "addr_info": [
+                {"family": "inet", "local": "10.29.8.1", "prefixlen": 24, "scope": "global"},
+            ],
+        }])
         with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
              patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
-             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/24"]), \
-             patch("corpweb_sync_agent._reconcile_one_iface") as m:
+             patch("corpweb_sync_agent.subprocess.run",
+                   return_value=_completed(0, live_json)) as m:
             metrics = agent.reconcile_iface_addresses(apply=False)
-        m.assert_not_called()
+
         assert metrics["iface_addr_drift_detected"] is True
         assert "iface_addr_drift_applied_count" not in metrics
+        assert m.call_args_list, "expected at least one read of kernel state"
+        for call in m.call_args_list:
+            assert call.args[0] == [
+                "ip", "-j", "-4", "addr", "show", "dev", "antizapret",
+            ], f"unexpected mutating call: {call.args[0]}"
 
     def test_absent_iface_is_skipped(self):
         with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
@@ -490,4 +525,44 @@ class TestReconcileIfaceAddresses:
         with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
              patch("corpweb_sync_agent._conf_addresses", side_effect=RuntimeError("boom")):
             metrics = agent.reconcile_iface_addresses(apply=True)
+        assert metrics["iface_addr_drift_failed"] is True
+
+    def test_saturated_failure_is_reported_in_detect_only_mode(self):
+        """F1 fix round 1: the CP only ever receives the detect-only pass's
+        metrics (task 6 discards the apply pass's return value), so a
+        permanently-failing interface must be flagged as failed even when
+        apply=False — otherwise the one metric that says 'this needs a
+        human' can never reach a human."""
+        agent._addr_reconcile_failures["antizapret"] = agent._ADDR_RECONCILE_MAX_FAILURES
+        with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", return_value=["10.29.8.1/21"]), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/24"]), \
+             patch("corpweb_sync_agent._reconcile_one_iface") as m:
+            metrics = agent.reconcile_iface_addresses(apply=False)
+        m.assert_not_called()
+        assert metrics["iface_addr_drift_failed"] is True
+        assert metrics["iface_addr_drift_detected"] is True
+
+    def test_one_iface_failing_does_not_block_the_others(self):
+        """F4 fix round 1: every prior test patched _IFACE_CONFS down to a
+        single entry, so two claims went unverified — that one interface's
+        unexpected failure does not stop the rest of the loop, and that
+        iface_addr_drift carries an entry per drifting interface, not just
+        the first."""
+        def fake_conf_addresses(conf_path):
+            if conf_path == TWO_IFACES["antizapret"]:
+                raise RuntimeError("boom")
+            return ["10.29.16.1/24"]
+
+        with patch.dict(agent._IFACE_CONFS, TWO_IFACES, clear=True), \
+             patch("corpweb_sync_agent._conf_addresses", side_effect=fake_conf_addresses), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.16.1/21"]), \
+             patch("corpweb_sync_agent._reconcile_one_iface", return_value=True) as m:
+            metrics = agent.reconcile_iface_addresses(apply=True)
+
+        m.assert_called_once_with("vpn", ["10.29.16.1/21"], ["10.29.16.1/24"])
+        assert "antizapret" not in metrics["iface_addr_drift"]
+        assert metrics["iface_addr_drift"]["vpn"] == {
+            "live": ["10.29.16.1/21"], "want": ["10.29.16.1/24"],
+        }
         assert metrics["iface_addr_drift_failed"] is True
