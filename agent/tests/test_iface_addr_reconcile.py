@@ -142,3 +142,59 @@ class TestIpAddrShow:
     def test_returns_none_when_ip_binary_missing(self):
         with patch("corpweb_sync_agent.subprocess.run", side_effect=FileNotFoundError):
             assert agent._ip_addr_show("antizapret") is None
+
+
+class TestConfAddresses:
+    """Every Address value must be collected. Dropping one would put it in
+    live-minus-want and get it deleted from the running interface."""
+
+    def _conf(self, tmp_path, body: str) -> str:
+        path = tmp_path / "antizapret.conf"
+        path.write_text(body)
+        return str(path)
+
+    def test_reads_single_address(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\nPrivateKey = X\nAddress = 10.29.8.1/21\n")
+        assert agent._conf_addresses(conf) == ["10.29.8.1/21"]
+
+    def test_tolerates_extra_whitespace(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\n   Address   =    10.29.8.1/21   \n")
+        assert agent._conf_addresses(conf) == ["10.29.8.1/21"]
+
+    def test_reads_comma_separated_list(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\nAddress = 10.29.8.1/21, 10.29.16.1/24\n")
+        assert agent._conf_addresses(conf) == ["10.29.8.1/21", "10.29.16.1/24"]
+
+    def test_reads_several_address_lines(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\nAddress = 10.29.8.1/21\nAddress = 10.29.16.1/24\n")
+        assert agent._conf_addresses(conf) == ["10.29.8.1/21", "10.29.16.1/24"]
+
+    def test_ipv6_is_ignored(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\nAddress = 10.29.8.1/21, fd00::1/64\n")
+        assert agent._conf_addresses(conf) == ["10.29.8.1/21"]
+
+    def test_bare_address_is_treated_as_host_route(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\nAddress = 10.29.8.1\n")
+        assert agent._conf_addresses(conf) == ["10.29.8.1/32"]
+
+    def test_allowedips_in_peer_section_is_not_an_address(self, tmp_path):
+        conf = self._conf(
+            tmp_path,
+            "[Interface]\nAddress = 10.29.8.1/21\n\n[Peer]\nAllowedIPs = 10.29.9.5/32\n",
+        )
+        assert agent._conf_addresses(conf) == ["10.29.8.1/21"]
+
+    def test_commented_address_is_ignored(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\n# Address = 10.29.8.1/24\nAddress = 10.29.8.1/21\n")
+        assert agent._conf_addresses(conf) == ["10.29.8.1/21"]
+
+    def test_garbage_value_is_skipped(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\nAddress = not-an-address\n")
+        assert agent._conf_addresses(conf) == []
+
+    def test_missing_address_line_yields_empty(self, tmp_path):
+        conf = self._conf(tmp_path, "[Interface]\nPrivateKey = X\nListenPort = 51443\n")
+        assert agent._conf_addresses(conf) == []
+
+    def test_missing_file_yields_empty(self, tmp_path):
+        assert agent._conf_addresses(str(tmp_path / "nope.conf")) == []

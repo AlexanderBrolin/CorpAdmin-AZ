@@ -14,6 +14,7 @@ Config: /etc/corpweb-sync-agent.env
 import base64
 import glob
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -647,6 +648,45 @@ def _iface_state(iface: str) -> list[str] | None:
             if local is None or prefixlen is None:
                 continue
             addresses.append(f"{local}/{prefixlen}")
+    return addresses
+
+
+def _conf_addresses(conf_path: str) -> list[str]:
+    """
+    Return the IPv4 addresses from the ``Address =`` lines of a wg-quick conf,
+    normalised to ``<ip>/<prefixlen>`` so they compare byte-for-byte with what
+    _iface_state() reports.
+
+    wg-quick allows several Address lines and a comma-separated list on each,
+    and every value is collected on purpose: an address the parser missed would
+    land in live-minus-want and be deleted from the running interface. IPv6 is
+    ignored — the reconciler only ever looks at IPv4.
+
+    An empty list means "desired state unknown"; callers must skip the
+    interface rather than assume it should have no addresses.
+    """
+    try:
+        with open(conf_path) as fh:
+            content = fh.read()
+    except OSError:
+        return []
+
+    addresses: list[str] = []
+    for line in content.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep or key.strip().lower() != "address":
+            continue
+        for item in value.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                parsed = ipaddress.ip_interface(item)
+            except ValueError:
+                log.warning("Ignoring unparsable Address %r in %s", item, conf_path)
+                continue
+            if parsed.version == 4:
+                addresses.append(str(parsed))
     return addresses
 
 
