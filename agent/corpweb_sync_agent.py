@@ -14,6 +14,7 @@ Config: /etc/corpweb-sync-agent.env
 import base64
 import glob
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -94,6 +95,17 @@ MANAGED_FILES: list[tuple[str, str | None]] = [
 ]
 
 MANAGED_PATHS: set[str] = {p for p, _ in MANAGED_FILES}
+
+# Interface → wg-quick / awg-quick conf path. Single definition of the set of
+# interfaces the agent manages: _IFACES is derived from it, _apply_wg_config()
+# patches these files, and reconcile_iface_addresses() compares them against
+# the kernel.
+_IFACE_CONFS: dict[str, str] = {
+    "antizapret": "/etc/wireguard/antizapret.conf",
+    "vpn": "/etc/wireguard/vpn.conf",
+    "az_escape": "/etc/amnezia/amneziawg/az_escape.conf",
+    "vpn_escape": "/etc/amnezia/amneziawg/vpn_escape.conf",
+}
 
 # ---------------------------------------------------------------------------
 # Escape-rules extension (via upstream custom-up.sh / custom-down.sh hooks)
@@ -570,17 +582,267 @@ def apply_wg_syncconf(iface: str) -> None:
         )
 
 
-def _iface_is_up(iface: str) -> bool:
-    """Return True if the network iface currently exists in the kernel."""
+# Consecutive failed reconcile attempts per interface, and the number of
+# successful reconciles this process has performed. startup_reconcile() runs on
+# every SSE reconnect, so a fix that refuses to stick must stop being retried
+# rather than hammer a production interface in a loop.
+_ADDR_RECONCILE_MAX_FAILURES = 3
+_addr_reconcile_failures: dict[str, int] = {}
+_addr_reconcile_applied_total = 0
+
+
+def _ip_addr_show(iface: str) -> subprocess.CompletedProcess | None:
+    """
+    Run ``ip -j -4 addr show dev <iface>``.
+
+    Returns the completed process, or None if the ip binary is missing.
+    Callers distinguish three outcomes: a non-zero return code (the interface
+    does not exist), rc 0 with an empty JSON array (it exists but carries no
+    IPv4 address), and rc 0 with an entry.
+    """
     try:
-        result = subprocess.run(
-            ["ip", "link", "show", iface],
+        return subprocess.run(
+            ["ip", "-j", "-4", "addr", "show", "dev", iface],
             capture_output=True,
             text=True,
         )
-        return result.returncode == 0
     except FileNotFoundError:
+        return None
+
+
+def _iface_is_up(iface: str) -> bool:
+    """Return True if the network iface currently exists in the kernel."""
+    result = _ip_addr_show(iface)
+    return result is not None and result.returncode == 0
+
+
+def _iface_state(iface: str) -> list[str] | None:
+    """
+    Return the iface's global IPv4 addresses as ``<ip>/<prefixlen>`` strings.
+
+    None means there is no usable answer — the interface does not exist, the ip
+    binary is missing, or the output did not parse. An empty list means the
+    interface exists but has no IPv4 address, which is a state the reconciler
+    corrects rather than skips.
+    """
+    result = _ip_addr_show(iface)
+    if result is None or result.returncode != 0:
+        return None
+    try:
+        entries = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        log.error("Could not parse `ip -j -4 addr show dev %s` output", iface)
+        return None
+    if not isinstance(entries, list):
+        log.error("Unexpected `ip -j` payload for %s: %r", iface, type(entries))
+        return None
+
+    addresses: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for info in entry.get("addr_info", []):
+            if info.get("family") != "inet" or info.get("scope") != "global":
+                continue
+            local, prefixlen = info.get("local"), info.get("prefixlen")
+            if local is None or prefixlen is None:
+                continue
+            addresses.append(f"{local}/{prefixlen}")
+    return addresses
+
+
+def _conf_addresses(conf_path: str) -> list[str]:
+    """
+    Return the IPv4 addresses from the ``Address =`` lines of a wg-quick conf,
+    normalised to ``<ip>/<prefixlen>`` so they compare byte-for-byte with what
+    _iface_state() reports.
+
+    wg-quick allows several Address lines and a comma-separated list on each,
+    and every value is collected on purpose: an address the parser missed would
+    land in live-minus-want and be deleted from the running interface. IPv6 is
+    ignored — the reconciler only ever looks at IPv4.
+
+    An empty list means "desired state unknown"; callers must skip the
+    interface rather than assume it should have no addresses.
+    """
+    try:
+        with open(conf_path) as fh:
+            content = fh.read()
+    except OSError:
+        return []
+
+    addresses: list[str] = []
+    for line in content.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep or key.strip().lower() != "address":
+            continue
+        for item in value.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                parsed = ipaddress.ip_interface(item)
+            except ValueError:
+                log.warning("Ignoring unparsable Address %r in %s", item, conf_path)
+                continue
+            if parsed.version == 4:
+                addresses.append(str(parsed))
+    return addresses
+
+
+def _ip_addr(op: str, addr: str, iface: str) -> bool:
+    """Run ``ip addr add|del <addr> dev <iface>``. Returns True on success."""
+    try:
+        subprocess.run(
+            ["ip", "addr", op, addr, "dev", iface],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        log.error("ip addr %s %s dev %s failed (rc=%d): %s",
+                  op, addr, iface, exc.returncode, (exc.stderr or "").strip())
         return False
+    except FileNotFoundError:
+        log.error("ip binary not found — cannot run 'ip addr %s'", op)
+        return False
+    log.info("ip addr %s %s dev %s", op, addr, iface)
+    return True
+
+
+def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
+    """
+    Bring one interface's address set to ``want``. Returns True if the kernel
+    ends up matching exactly.
+
+    Refuses outright to work against an empty desired set: the caller already
+    skips that case, but the function that issues the deletes must not depend
+    on it — stripping every address off a live interface is the one outcome
+    this code must never produce.
+
+    Adds before deleting, so the interface is never momentarily without an
+    address, and re-reads the kernel after every delete: with
+    promote_secondaries off, removing a primary address also removes the
+    secondaries in its subnet, so anything wanted that disappears is restored
+    at once and the remaining deletes are abandoned. If the kernel becomes
+    unreadable right after a delete (interface gone, ip missing, non-zero rc,
+    unparsable JSON, non-list payload), the same restore is attempted blind —
+    every address in ``want`` is re-added, since the live state cannot be
+    trusted but ``want`` (from the conf) still can be.
+    """
+    live_set, want_set = set(live), set(want)
+
+    if not want_set:
+        log.error("Refusing to reconcile %s against an empty desired address set", iface)
+        return False
+
+    for addr in sorted(want_set - live_set):
+        if not _ip_addr("add", addr, iface):
+            return False
+
+    for addr in sorted(live_set - want_set):
+        if not _ip_addr("del", addr, iface):
+            return False
+        current = _iface_state(iface)
+        if current is None:
+            log.error("Lost sight of %s after removing %s — re-adding every wanted address",
+                      iface, addr)
+            for wanted in sorted(want_set):
+                _ip_addr("add", wanted, iface)
+            return False
+        missing = want_set - set(current)
+        if missing:
+            log.error("Removing %s from %s also dropped %s — restoring, no further deletes",
+                      addr, iface, sorted(missing))
+            for lost in sorted(missing):
+                _ip_addr("add", lost, iface)
+            return False
+
+    final = _iface_state(iface)
+    return final is not None and set(final) == want_set
+
+
+def reconcile_iface_addresses(apply: bool) -> dict:
+    """
+    Compare each managed interface's live IPv4 addresses against its conf and,
+    when ``apply`` is set, bring the kernel into line. Returns heartbeat
+    metrics describing what was found.
+
+    An interface is only touched when it exists and its conf yields at least
+    one address: without a trustworthy desired state we never mutate a live
+    interface. ``iface_addr_drift`` reports what the pass found, whether or not
+    the pass then fixed it; ``iface_addr_drift_applied_count`` says how many
+    fixes this process has made. ``iface_addr_drift_failed`` is reported on
+    every pass, ``apply`` or not: only the detect-only pass's metrics reach
+    the control plane, so a saturated interface (three failed fix attempts)
+    must still surface as failed when merely detecting, or nothing would ever
+    tell a human it gave up retrying.
+
+    ``iface_addr_drift_failed`` therefore conflates two distinct conditions —
+    an interface exhausted its backoff, or processing an interface raised.
+    ``iface_addr_error``, when present in this function's return value, tells
+    them apart: it maps the name of every interface whose processing raised
+    to a description of what was raised. (``send_heartbeat`` also sets a key
+    of this same name, but to a single string, when the call to this function
+    itself raises — a different shape for the same key, not the same case.)
+
+    Never raises — the heartbeat must survive any failure here.
+    """
+    global _addr_reconcile_applied_total
+
+    drift: dict = {}
+    failed = False
+    errors: dict = {}
+
+    for iface, conf_path in _IFACE_CONFS.items():
+        try:
+            want = _conf_addresses(conf_path)
+            if not want:
+                continue
+            live = _iface_state(iface)
+            if live is None:
+                continue
+            if set(live) == set(want):
+                _addr_reconcile_failures.pop(iface, None)
+                continue
+
+            drift[iface] = {"live": sorted(live), "want": sorted(want)}
+
+            if _addr_reconcile_failures.get(iface, 0) >= _ADDR_RECONCILE_MAX_FAILURES:
+                failed = True
+                if apply:
+                    log.error("Address drift on %s persists after %d attempts — not retrying",
+                              iface, _ADDR_RECONCILE_MAX_FAILURES)
+                continue
+
+            if not apply:
+                continue
+
+            log.warning("Address drift on %s: live=%s want=%s — reconciling",
+                        iface, sorted(live), sorted(want))
+            if _reconcile_one_iface(iface, live, want):
+                _addr_reconcile_applied_total += 1
+                _addr_reconcile_failures.pop(iface, None)
+            else:
+                _addr_reconcile_failures[iface] = _addr_reconcile_failures.get(iface, 0) + 1
+                if _addr_reconcile_failures[iface] >= _ADDR_RECONCILE_MAX_FAILURES:
+                    failed = True
+        except Exception as exc:  # defensive — the heartbeat must not break
+            log.error("Address reconcile failed for %s: %s", iface, exc)
+            errors[iface] = f"{exc.__class__.__name__}: {exc}"
+            failed = True
+
+    metrics: dict = {}
+    if drift:
+        metrics["iface_addr_drift_detected"] = True
+        metrics["iface_addr_drift"] = drift
+    if _addr_reconcile_applied_total:
+        metrics["iface_addr_drift_applied_count"] = _addr_reconcile_applied_total
+    if failed:
+        metrics["iface_addr_drift_failed"] = True
+    if errors:
+        metrics["iface_addr_error"] = errors
+    return metrics
 
 
 def apply_iface_conf(iface: str, flavor: str) -> None:
@@ -775,63 +1037,25 @@ def register_if_needed() -> None:
 
 def _apply_wg_config(cfg: dict) -> None:
     """Patch [Interface] section in WG conf files with CP-provided config."""
-    iface_map = {
-        "antizapret": {
-            "conf": "/etc/wireguard/antizapret.conf",
-            "address": cfg.get("antizapret_address"),
-            "port": cfg.get("antizapret_listen_port"),
-        },
-        "vpn": {
-            "conf": "/etc/wireguard/vpn.conf",
-            "address": cfg.get("vpn_address"),
-            "port": cfg.get("vpn_listen_port"),
-        },
-        "az_escape": {
-            "conf": "/etc/amnezia/amneziawg/az_escape.conf",
-            "address": cfg.get("az_escape_address"),
-            "port": cfg.get("az_escape_listen_port"),
-        },
-        "vpn_escape": {
-            "conf": "/etc/amnezia/amneziawg/vpn_escape.conf",
-            "address": cfg.get("vpn_escape_address"),
-            "port": cfg.get("vpn_escape_listen_port"),
-        },
-    }
     mtu = cfg.get("mtu")
 
-    for iface, params in iface_map.items():
-        conf_path = params["conf"]
+    for iface, conf_path in _IFACE_CONFS.items():
         if not os.path.exists(conf_path):
             continue
 
         content = open(conf_path).read()
         changed = False
 
-        if params["address"]:
-            import re
+        for key, value in (
+            ("Address", cfg.get(f"{iface}_address")),
+            ("ListenPort", cfg.get(f"{iface}_listen_port")),
+            ("MTU", mtu),
+        ):
+            if not value:
+                continue
             new_content = re.sub(
-                r'^Address\s*=\s*.*$',
-                f'Address = {params["address"]}',
-                content, flags=re.MULTILINE,
-            )
-            if new_content != content:
-                content = new_content
-                changed = True
-
-        if params["port"]:
-            new_content = re.sub(
-                r'^ListenPort\s*=\s*.*$',
-                f'ListenPort = {params["port"]}',
-                content, flags=re.MULTILINE,
-            )
-            if new_content != content:
-                content = new_content
-                changed = True
-
-        if mtu:
-            new_content = re.sub(
-                r'^MTU\s*=\s*.*$',
-                f'MTU = {mtu}',
+                rf"^{key}\s*=\s*.*$",
+                f"{key} = {value}",
                 content, flags=re.MULTILINE,
             )
             if new_content != content:
@@ -848,7 +1072,7 @@ def _apply_wg_config(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def startup_reconcile() -> None:
-    """Fetch all 12 managed files from the control plane and apply if changed."""
+    """Fetch every file in MANAGED_FILES from the control plane and apply if changed."""
     log.info("Running startup reconcile for %d files", len(MANAGED_FILES))
 
     for path, hook in MANAGED_FILES:
@@ -864,6 +1088,14 @@ def startup_reconcile() -> None:
                 log.warning("Failed to fetch %s: %s", path, exc)
         except (requests.ConnectionError, KeyError) as exc:
             log.warning("Failed to fetch %s: %s", path, exc)
+
+    # Only safe here, after the loop: the confs on disk are the control plane's
+    # version as of the last successful fetch. When the CP is unreachable every
+    # fetch above failed and this falls back to the last known good conf, which
+    # is still the right target — after provisioning the agent is that file's
+    # only writer. Reconciling before the loop would enforce a conf the CP had
+    # already superseded.
+    reconcile_iface_addresses(apply=True)
 
     # Push node-side ground truth back to CP (CorpAdmin-AZ-byc).
     # blob_path is the canonical key CP stores under — independent of where
@@ -884,10 +1116,11 @@ def startup_reconcile() -> None:
 # ---------------------------------------------------------------------------
 
 # Ordered tuple of WireGuard / AmneziaWG ifaces the agent monitors for peer
-# activity. The first two are the baseline; the last two host escape-mode
+# activity. Derived from _IFACE_CONFS so the managed interface set has exactly
+# one definition. The first two are the baseline; the last two host escape-mode
 # (bypass) tunnels. collect_metrics() emits one active_peers_<iface> key per
 # entry; collect_peers() iterates this tuple when dumping peer state.
-_IFACES: tuple[str, ...] = ("antizapret", "vpn", "az_escape", "vpn_escape")
+_IFACES: tuple[str, ...] = tuple(_IFACE_CONFS)
 
 # AmneziaWG ifaces require the 'awg' CLI; WireGuard ifaces use 'wg'. They are
 # otherwise drop-in compatible (same dump/latest-handshakes format).
@@ -1002,6 +1235,13 @@ def send_heartbeat() -> None:
         log.error("sync_escape_rules unexpectedly raised: %s", exc)
         escape_metrics = {"escape_error": f"unexpected: {exc.__class__.__name__}"}
     metrics.update(escape_metrics)
+
+    try:
+        addr_metrics = reconcile_iface_addresses(apply=False)
+    except Exception as exc:  # defensive — mirrors the sync_escape_rules guard
+        log.error("reconcile_iface_addresses unexpectedly raised: %s", exc)
+        addr_metrics = {"iface_addr_error": f"unexpected: {exc.__class__.__name__}"}
+    metrics.update(addr_metrics)
 
     payload = {
         "applied_sha": _applied_shas(),

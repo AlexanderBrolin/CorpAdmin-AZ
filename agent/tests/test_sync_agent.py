@@ -544,3 +544,19 @@ class TestCollectPeersEscapeAware:
 
         ifaces_seen = {p["interface"] for p in peers}
         assert ifaces_seen == {"antizapret", "vpn", "vpn_escape"}
+
+
+class TestIfaceConfsSingleSource:
+    """_IFACES must be derived from _IFACE_CONFS — one definition of the
+    managed interface set, not two that can drift apart."""
+
+    def test_iface_confs_maps_all_four_ifaces_to_their_conf_paths(self):
+        assert agent._IFACE_CONFS == {
+            "antizapret": "/etc/wireguard/antizapret.conf",
+            "vpn": "/etc/wireguard/vpn.conf",
+            "az_escape": "/etc/amnezia/amneziawg/az_escape.conf",
+            "vpn_escape": "/etc/amnezia/amneziawg/vpn_escape.conf",
+        }
+
+    def test_ifaces_is_derived_from_iface_confs(self):
+        assert agent._IFACES == tuple(agent._IFACE_CONFS)
