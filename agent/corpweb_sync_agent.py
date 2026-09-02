@@ -778,12 +778,21 @@ def reconcile_iface_addresses(apply: bool) -> dict:
     must still surface as failed when merely detecting, or nothing would ever
     tell a human it gave up retrying.
 
+    ``iface_addr_drift_failed`` therefore conflates two distinct conditions —
+    an interface exhausted its backoff, or processing an interface raised.
+    ``iface_addr_error``, when present in this function's return value, tells
+    them apart: it maps the name of every interface whose processing raised
+    to a description of what was raised. (``send_heartbeat`` also sets a key
+    of this same name, but to a single string, when the call to this function
+    itself raises — a different shape for the same key, not the same case.)
+
     Never raises — the heartbeat must survive any failure here.
     """
     global _addr_reconcile_applied_total
 
     drift: dict = {}
     failed = False
+    errors: dict = {}
 
     for iface, conf_path in _IFACE_CONFS.items():
         try:
@@ -820,6 +829,7 @@ def reconcile_iface_addresses(apply: bool) -> dict:
                     failed = True
         except Exception as exc:  # defensive — the heartbeat must not break
             log.error("Address reconcile failed for %s: %s", iface, exc)
+            errors[iface] = f"{exc.__class__.__name__}: {exc}"
             failed = True
 
     metrics: dict = {}
@@ -830,6 +840,8 @@ def reconcile_iface_addresses(apply: bool) -> dict:
         metrics["iface_addr_drift_applied_count"] = _addr_reconcile_applied_total
     if failed:
         metrics["iface_addr_drift_failed"] = True
+    if errors:
+        metrics["iface_addr_error"] = errors
     return metrics
 
 
@@ -1060,7 +1072,7 @@ def _apply_wg_config(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def startup_reconcile() -> None:
-    """Fetch all 12 managed files from the control plane and apply if changed."""
+    """Fetch every file in MANAGED_FILES from the control plane and apply if changed."""
     log.info("Running startup reconcile for %d files", len(MANAGED_FILES))
 
     for path, hook in MANAGED_FILES:

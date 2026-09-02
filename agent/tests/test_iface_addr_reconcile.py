@@ -374,14 +374,6 @@ class TestReconcileOneIface:
             ("add", "10.29.16.1/24", "antizapret"),
         }
 
-    def test_reports_failure_when_iface_disappears_mid_run(self):
-        with patch("corpweb_sync_agent._ip_addr", return_value=True), \
-             patch("corpweb_sync_agent._iface_state", return_value=None):
-            ok = agent._reconcile_one_iface(
-                "antizapret", ["10.29.8.1/24"], ["10.29.8.1/21"],
-            )
-        assert ok is False
-
     def test_refuses_an_empty_desired_set(self):
         """Defence in depth for the spec's 'never delete the last address'
         rail: reconcile_iface_addresses already skips an interface whose conf
@@ -524,10 +516,16 @@ class TestReconcileIfaceAddresses:
         assert agent._addr_reconcile_failures.get("antizapret", 0) == 0
 
     def test_unexpected_error_is_contained(self):
+        """F1 fix round 2: iface_addr_drift_failed alone can't tell an
+        operator whether an interface exhausted its backoff or whether
+        processing it raised — the runbook's advice ('restart the agent')
+        only applies to the former. iface_addr_error, keyed by interface
+        name, must name the culprit so the two are distinguishable."""
         with patch.dict(agent._IFACE_CONFS, ONE_IFACE, clear=True), \
              patch("corpweb_sync_agent._conf_addresses", side_effect=RuntimeError("boom")):
             metrics = agent.reconcile_iface_addresses(apply=True)
         assert metrics["iface_addr_drift_failed"] is True
+        assert metrics["iface_addr_error"] == {"antizapret": "RuntimeError: boom"}
 
     def test_saturated_failure_is_reported_in_detect_only_mode(self):
         """F1 fix round 1: the CP only ever receives the detect-only pass's

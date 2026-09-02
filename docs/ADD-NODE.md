@@ -367,9 +367,9 @@ for i in antizapret vpn az_escape vpn_escape; do
     az_escape|vpn_escape) c=/etc/amnezia/amneziawg/$i.conf ;;
     *)                    c=/etc/wireguard/$i.conf ;;
   esac
-  printf '%-12s live=%-18s conf=%s\n' "$i" \
-    "$(ip -4 -br addr show dev $i 2>/dev/null | awk '{print $3}')" \
-    "$(grep -m1 '^Address' $c 2>/dev/null | sed 's/.*= *//')"
+  live="$(ip -4 -br addr show dev $i 2>/dev/null | awk '{print $3}')"
+  conf="$(grep -m1 '^[[:space:]]*Address' $c 2>/dev/null | sed 's/.*= *//')"
+  printf '%-12s live=%-18s conf=%s\n' "$i" "${live:-<ОТСУТСТВУЕТ>}" "${conf:-<ОТСУТСТВУЕТ>}"
 done
 ```
 
