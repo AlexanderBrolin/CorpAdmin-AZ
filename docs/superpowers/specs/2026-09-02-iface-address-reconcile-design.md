@@ -159,7 +159,7 @@ _ADDR_RECONCILE_MAX_FAILURES = 3
 
 def _ip_addr_show(iface) -> subprocess.CompletedProcess | None   # ip -j -4 addr show dev <iface>
 def _iface_is_up(iface) -> bool                                  # существующая, переписана поверх _ip_addr_show
-def _iface_state(iface) -> list[str] | None                      # адреса, либо None если ifacа нет
+def _iface_state(iface) -> list[str] | None                      # адреса, либо None если интерфейса нет
 def _conf_addresses(conf_path) -> list[str]                      # из строки Address =
 def _ip_addr(op, addr, iface) -> bool                            # ip addr add|del
 def reconcile_iface_addresses(apply: bool) -> dict               # → метрики
@@ -357,7 +357,14 @@ iface_addr_drift: {                          # только расходящие
 }
 iface_addr_drift_applied_count: int          # успешных приведений за жизнь процесса
 iface_addr_drift_failed: bool                # хотя бы один интерфейс исчерпал backoff
+iface_addr_error: str                        # сверщик неожиданно бросил исключение
 ```
+
+`iface_addr_error` — зеркало существующего `escape_error` из `sync_escape_rules()`:
+заполняется только в `send_heartbeat()`, если сверщик вопреки всему выбросил исключение.
+`iface_addr_drift` отражает состояние **на момент проверки**: если проход нашёл расхождение
+и тут же его исправил, ключ в этом проходе присутствует, а факт починки виден по
+`iface_addr_drift_applied_count`. Следующий heartbeat расхождения уже не покажет.
 
 Ключи с пустым значением не отправляются, чтобы не раздувать `nodes.metrics` в БД —
 как и в `sync_escape_rules()`.
