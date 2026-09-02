@@ -690,6 +690,71 @@ def _conf_addresses(conf_path: str) -> list[str]:
     return addresses
 
 
+def _ip_addr(op: str, addr: str, iface: str) -> bool:
+    """Run ``ip addr add|del <addr> dev <iface>``. Returns True on success."""
+    try:
+        subprocess.run(
+            ["ip", "addr", op, addr, "dev", iface],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        log.error("ip addr %s %s dev %s failed (rc=%d): %s",
+                  op, addr, iface, exc.returncode, (exc.stderr or "").strip())
+        return False
+    except FileNotFoundError:
+        log.error("ip binary not found — cannot run 'ip addr %s'", op)
+        return False
+    log.info("ip addr %s %s dev %s", op, addr, iface)
+    return True
+
+
+def _reconcile_one_iface(iface: str, live: list[str], want: list[str]) -> bool:
+    """
+    Bring one interface's address set to ``want``. Returns True if the kernel
+    ends up matching exactly.
+
+    Refuses outright to work against an empty desired set: the caller already
+    skips that case, but the function that issues the deletes must not depend
+    on it — stripping every address off a live interface is the one outcome
+    this code must never produce.
+
+    Adds before deleting, so the interface is never momentarily without an
+    address, and re-reads the kernel after every delete: with
+    promote_secondaries off, removing a primary address also removes the
+    secondaries in its subnet, so anything wanted that disappears is restored
+    at once and the remaining deletes are abandoned.
+    """
+    live_set, want_set = set(live), set(want)
+
+    if not want_set:
+        log.error("Refusing to reconcile %s against an empty desired address set", iface)
+        return False
+
+    for addr in sorted(want_set - live_set):
+        if not _ip_addr("add", addr, iface):
+            return False
+
+    for addr in sorted(live_set - want_set):
+        if not _ip_addr("del", addr, iface):
+            return False
+        current = _iface_state(iface)
+        if current is None:
+            log.error("Lost sight of %s while reconciling its addresses", iface)
+            return False
+        missing = want_set - set(current)
+        if missing:
+            log.error("Removing %s from %s also dropped %s — restoring, no further deletes",
+                      addr, iface, sorted(missing))
+            for lost in sorted(missing):
+                _ip_addr("add", lost, iface)
+            return False
+
+    final = _iface_state(iface)
+    return final is not None and set(final) == want_set
+
+
 def apply_iface_conf(iface: str, flavor: str) -> None:
     """
     Bring iface up (if it doesn't exist yet) or syncconf it (if it already

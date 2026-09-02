@@ -198,3 +198,119 @@ class TestConfAddresses:
 
     def test_missing_file_yields_empty(self, tmp_path):
         assert agent._conf_addresses(str(tmp_path / "nope.conf")) == []
+
+
+class TestIpAddr:
+    def test_add_invokes_full_argv(self):
+        with patch("corpweb_sync_agent.subprocess.run") as m:
+            assert agent._ip_addr("add", "10.29.8.1/21", "antizapret") is True
+        assert m.call_args[0][0] == [
+            "ip", "addr", "add", "10.29.8.1/21", "dev", "antizapret",
+        ]
+
+    def test_del_invokes_full_argv(self):
+        with patch("corpweb_sync_agent.subprocess.run") as m:
+            assert agent._ip_addr("del", "10.29.8.1/24", "antizapret") is True
+        assert m.call_args[0][0] == [
+            "ip", "addr", "del", "10.29.8.1/24", "dev", "antizapret",
+        ]
+
+    def test_returns_false_on_command_failure(self):
+        err = subprocess.CalledProcessError(2, ["ip"], stderr="boom")
+        with patch("corpweb_sync_agent.subprocess.run", side_effect=err):
+            assert agent._ip_addr("add", "10.29.8.1/21", "antizapret") is False
+
+    def test_returns_false_when_ip_binary_missing(self):
+        with patch("corpweb_sync_agent.subprocess.run", side_effect=FileNotFoundError):
+            assert agent._ip_addr("add", "10.29.8.1/21", "antizapret") is False
+
+
+class TestReconcileOneIface:
+    """The incident case and the ways applying it can go wrong."""
+
+    def test_adds_before_deleting(self):
+        """Regression for CorpAdmin-AZ-3f9: live /24, conf /21. The add must
+        precede the delete so the interface is never left without an address."""
+        calls: list[tuple] = []
+
+        def fake_ip_addr(op, addr, iface):
+            calls.append((op, addr, iface))
+            return True
+
+        with patch("corpweb_sync_agent._ip_addr", side_effect=fake_ip_addr), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/21"]):
+            ok = agent._reconcile_one_iface(
+                "antizapret", ["10.29.8.1/24"], ["10.29.8.1/21"],
+            )
+
+        assert ok is True
+        assert calls == [
+            ("add", "10.29.8.1/21", "antizapret"),
+            ("del", "10.29.8.1/24", "antizapret"),
+        ]
+
+    def test_failed_add_aborts_before_any_delete(self):
+        with patch("corpweb_sync_agent._ip_addr", return_value=False) as m, \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/24"]):
+            ok = agent._reconcile_one_iface(
+                "antizapret", ["10.29.8.1/24"], ["10.29.8.1/21"],
+            )
+
+        assert ok is False
+        assert [c[0][0] for c in m.call_args_list] == ["add"]
+
+    def test_restores_address_lost_to_promote_secondaries(self):
+        """With promote_secondaries=0, deleting the primary removes secondaries
+        in the same subnet. The wanted address must be put back and further
+        deletes abandoned."""
+        calls: list[tuple] = []
+
+        def fake_ip_addr(op, addr, iface):
+            calls.append((op, addr, iface))
+            return True
+
+        # After the delete the kernel reports an interface stripped of both.
+        with patch("corpweb_sync_agent._ip_addr", side_effect=fake_ip_addr), \
+             patch("corpweb_sync_agent._iface_state", return_value=[]):
+            ok = agent._reconcile_one_iface(
+                "antizapret", ["10.29.8.1/24", "10.29.8.2/24"], ["10.29.8.1/21"],
+            )
+
+        assert ok is False
+        assert calls[0] == ("add", "10.29.8.1/21", "antizapret")
+        assert calls[1][0] == "del"
+        assert ("add", "10.29.8.1/21", "antizapret") in calls[2:]
+        # the second delete never happened — only one del in the whole run
+        assert [c[0] for c in calls].count("del") == 1
+
+    def test_reports_failure_when_iface_disappears_mid_run(self):
+        with patch("corpweb_sync_agent._ip_addr", return_value=True), \
+             patch("corpweb_sync_agent._iface_state", return_value=None):
+            ok = agent._reconcile_one_iface(
+                "antizapret", ["10.29.8.1/24"], ["10.29.8.1/21"],
+            )
+        assert ok is False
+
+    def test_refuses_an_empty_desired_set(self):
+        """Defence in depth for the spec's 'never delete the last address'
+        rail: reconcile_iface_addresses already skips an interface whose conf
+        yields nothing, but the deleting function must not rely on its caller."""
+        with patch("corpweb_sync_agent._ip_addr") as m, \
+             patch("corpweb_sync_agent._iface_state", return_value=[]):
+            ok = agent._reconcile_one_iface("antizapret", ["10.29.8.1/21"], [])
+        assert ok is False
+        m.assert_not_called()
+
+    def test_adds_only_when_iface_has_no_addresses(self):
+        calls: list[tuple] = []
+
+        def fake_ip_addr(op, addr, iface):
+            calls.append((op, addr, iface))
+            return True
+
+        with patch("corpweb_sync_agent._ip_addr", side_effect=fake_ip_addr), \
+             patch("corpweb_sync_agent._iface_state", return_value=["10.29.8.1/21"]):
+            ok = agent._reconcile_one_iface("antizapret", [], ["10.29.8.1/21"])
+
+        assert ok is True
+        assert calls == [("add", "10.29.8.1/21", "antizapret")]
