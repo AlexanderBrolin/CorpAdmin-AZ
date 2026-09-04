@@ -112,6 +112,22 @@ class TestRenderCustomUpSh:
         assert 'iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 ! -d "$FAKE_IP.0.0/15" -j CONNMARK --set-mark 0x1' in out
         assert 'iptables -w -I FORWARD 2 -s 10.27.0.0/16 -m connmark --mark 0x1 -m set ! --match-set antizapret-forward dst -j DROP' in out
 
+    def test_client_isolation_block_is_conditional(self):
+        out = agent.render_custom_up_sh()
+        assert 'if [[ "$CLIENT_ISOLATION" == \'y\' ]]; then' in out
+
+    def test_client_isolation_blocks_escape_to_escape(self):
+        out = agent.render_custom_up_sh()
+        assert 'iptables -w -I FORWARD 2 -s 10.26.0.0/15 -d 10.26.0.0/15 -j DROP' in out
+
+    def test_client_isolation_blocks_escape_to_baseline(self):
+        out = agent.render_custom_up_sh()
+        assert 'iptables -w -I FORWARD 2 -s 10.26.0.0/15 -d 10.28.0.0/15 -j DROP' in out
+
+    def test_client_isolation_blocks_baseline_to_escape(self):
+        out = agent.render_custom_up_sh()
+        assert 'iptables -w -I FORWARD 2 -s 10.28.0.0/15 -d 10.26.0.0/15 -j DROP' in out
+
     def test_az_escape_postrouting_masquerade_branch(self):
         out = agent.render_custom_up_sh()
         assert 'if [[ -z "$ANTIZAPRET_OUT_IP" ]]; then' in out
@@ -163,6 +179,13 @@ class TestRenderCustomDownSh:
         assert 'if [[ "$RESTRICT_FORWARD" == \'y\' ]]; then' in out
         assert 'iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 ! -d "$FAKE_IP.0.0/15" -j CONNMARK --set-mark 0x1' in out
         assert 'iptables -w -D FORWARD -s 10.27.0.0/16 -m connmark --mark 0x1 -m set ! --match-set antizapret-forward dst -j DROP' in out
+
+    def test_client_isolation_deletes_conditional(self):
+        out = agent.render_custom_down_sh()
+        assert 'if [[ "$CLIENT_ISOLATION" == \'y\' ]]; then' in out
+        assert 'iptables -w -D FORWARD -s 10.26.0.0/15 -d 10.26.0.0/15 -j DROP' in out
+        assert 'iptables -w -D FORWARD -s 10.26.0.0/15 -d 10.28.0.0/15 -j DROP' in out
+        assert 'iptables -w -D FORWARD -s 10.28.0.0/15 -d 10.26.0.0/15 -j DROP' in out
 
     def test_az_escape_postrouting_deletes_both_branches(self):
         out = agent.render_custom_down_sh()

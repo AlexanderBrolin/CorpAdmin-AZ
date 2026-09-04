@@ -165,6 +165,18 @@ if [[ -z "$VPN_OUT_IP" ]]; then
 else
     iptables -w -t nat -A POSTROUTING -s 10.26.0.0/16 -o "$VPN_OUT_INTERFACE" -j SNAT --to-source "$VPN_OUT_IP"
 fi
+# Client isolation for the escape subnets (10.26/10.27). Upstream's own
+# CLIENT_ISOLATION rule only covers its client range and its shape differs
+# between releases: older nodes carry "-d 10.28.0.0/15 ! -i eth0 -j DROP",
+# newer ones "-s 10.28.0.0/15 -d 10.28.0.0/15 -j DROP". Neither covers traffic
+# to the escape subnets, and the newer form does not cover traffic from them
+# either. These three rules close every remaining client-to-client path and are
+# purely address-based, so they hold whichever upstream form is installed.
+if [[ "$CLIENT_ISOLATION" == 'y' ]]; then
+    iptables -w -I FORWARD 2 -s 10.26.0.0/15 -d 10.26.0.0/15 -j DROP
+    iptables -w -I FORWARD 2 -s 10.26.0.0/15 -d 10.28.0.0/15 -j DROP
+    iptables -w -I FORWARD 2 -s 10.28.0.0/15 -d 10.26.0.0/15 -j DROP
+fi
 """
     return ESCAPE_MARKER_BEGIN + "\n" + body + ESCAPE_MARKER_END + "\n"
 
@@ -213,6 +225,13 @@ if [[ "$VPN_DNS" == '1' ]]; then
 fi
 iptables -w -t nat -D POSTROUTING -s 10.26.0.0/16 -o "$VPN_OUT_INTERFACE" -j MASQUERADE
 iptables -w -t nat -D POSTROUTING -s 10.26.0.0/16 -o "$VPN_OUT_INTERFACE" -j SNAT --to-source "$VPN_OUT_IP"
+
+# Escape-subnet client isolation — mirror of the up-rules
+if [[ "$CLIENT_ISOLATION" == 'y' ]]; then
+    iptables -w -D FORWARD -s 10.26.0.0/15 -d 10.26.0.0/15 -j DROP
+    iptables -w -D FORWARD -s 10.26.0.0/15 -d 10.28.0.0/15 -j DROP
+    iptables -w -D FORWARD -s 10.28.0.0/15 -d 10.26.0.0/15 -j DROP
+fi
 """
     return ESCAPE_MARKER_BEGIN + "\n" + body + ESCAPE_MARKER_END + "\nexit 0\n"
 
