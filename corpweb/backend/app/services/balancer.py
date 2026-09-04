@@ -217,7 +217,7 @@ def read_current_state() -> dict:
 def apply_rules(
     nodes: list[dict],
     cp_ip: str,
-    escape_enabled: bool = False,
+    escape_enabled: bool,
 ) -> dict:
     """
     Apply DNAT + SNAT rules safely using flush + add (NOT iptables-restore).

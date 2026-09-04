@@ -20,6 +20,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _escape_enabled(db: Session) -> bool:
+    """
+    Whether the escape-mode ports (UDP 500 / 53443) must carry DNAT rules.
+
+    apply_rules() rebuilds nat PREROUTING from scratch, so this has to be
+    passed on every apply: omitting it tears escape down and persists the
+    loss, which is how ports 500/53443 disappeared from the live CP on
+    2026-09-01 (CorpAdmin-AZ-c1l).
+    """
+    from app.db.models import SystemSettings
+    ss = db.query(SystemSettings).filter(SystemSettings.id == 1).first()
+    return bool(ss and ss.escape_enabled)
+
+
 def _detect_cp_ip(db: Session) -> str:
     """
     Determine control-plane IP for SNAT rules.
@@ -150,7 +164,11 @@ def update_balancer(
     ]
 
     try:
-        new_state = apply_rules(nodes_payload, cp_ip=cp_ip)
+        new_state = apply_rules(
+            nodes_payload,
+            cp_ip=cp_ip,
+            escape_enabled=_escape_enabled(db),
+        )
     except Exception as exc:
         logger.error("Failed to apply iptables rules: %s", exc)
         raise HTTPException(
