@@ -94,13 +94,31 @@ class TestRenderCustomUpSh:
         assert 'VPN_OUT_INTERFACE="${VPN_OUT_INTERFACE:-$DEFAULT_INTERFACE}"' in out
         assert 'VPN_OUT_IP="${VPN_OUT_IP:-$DEFAULT_IP}"' in out
 
-    def test_az_escape_dns_dnat_udp(self):
-        out = agent.render_custom_up_sh()
-        assert 'iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -p udp --dport 53 -j DNAT --to-destination 127.0.0.1' in out
+    def test_az_escape_dns_dnat_mirrors_upstream_address(self):
+        """The resolver address must come from the node, not a constant.
 
-    def test_az_escape_dns_dnat_tcp(self):
+        It moved between AntiZapret releases (127.0.0.1 on the release wgfi3
+        runs, 127.1.1.1 on the newer one wgfi4 got), so a hardcoded value
+        points escape DNS at an address nothing listens on.
+        """
         out = agent.render_custom_up_sh()
-        assert 'iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.1' in out
+        assert 'iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -p udp --dport 53 -j DNAT --to-destination "$AZ_DNS_IP"' in out
+        assert 'iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -p tcp --dport 53 -j DNAT --to-destination "$AZ_DNS_IP"' in out
+        assert '--to-destination 127.0.0.1' not in out
+
+    def test_az_dns_ip_is_read_from_the_baseline_rule(self):
+        out = agent.render_custom_up_sh()
+        assert 'AZ_DNS_IP="$(_mirror_dns 10.29.0.0/16)"' in out
+
+    def test_vpn_dns_ip_is_read_from_the_baseline_rule(self):
+        out = agent.render_custom_up_sh()
+        assert 'VPN_DNS_IP="$(_mirror_dns 10.28.0.0/16)"' in out
+
+    def test_escape_dns_is_skipped_loudly_when_lookup_fails(self):
+        """Better no rule than a rule pointing into a black hole."""
+        out = agent.render_custom_up_sh()
+        assert 'if [[ -n "$AZ_DNS_IP" ]]; then' in out
+        assert 'custom-up: no upstream DNS DNAT for 10.29.0.0/16' in out
 
     def test_az_escape_fake_ip_mapping(self):
         out = agent.render_custom_up_sh()
@@ -140,8 +158,9 @@ class TestRenderCustomUpSh:
     def test_vpn_escape_dns_dnat_is_conditional_on_vpn_dns(self):
         out = agent.render_custom_up_sh()
         assert 'if [[ "$VPN_DNS" == \'1\' ]]; then' in out
-        assert 'iptables -w -t nat -A PREROUTING -s 10.26.0.0/16 -p udp --dport 53 -j DNAT --to-destination 127.0.0.2' in out
-        assert 'iptables -w -t nat -A PREROUTING -s 10.26.0.0/16 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.2' in out
+        assert 'iptables -w -t nat -A PREROUTING -s 10.26.0.0/16 -p udp --dport 53 -j DNAT --to-destination "$VPN_DNS_IP"' in out
+        assert 'iptables -w -t nat -A PREROUTING -s 10.26.0.0/16 -p tcp --dport 53 -j DNAT --to-destination "$VPN_DNS_IP"' in out
+        assert '--to-destination 127.0.0.2' not in out
 
     def test_vpn_escape_postrouting_masquerade_branch(self):
         out = agent.render_custom_up_sh()
@@ -165,10 +184,15 @@ class TestRenderCustomDownSh:
         assert 'IP=10' in out
         assert 'FAKE_IP="$IP.30"' in out
 
-    def test_az_escape_dns_dnat_deletes(self):
+    def test_az_escape_dns_dnat_deletes_the_installed_address(self):
+        """Upstream removes its own DNS rules before calling custom-down.sh,
+        so the address cannot be mirrored here — read it back off the escape
+        rule that is actually installed."""
         out = agent.render_custom_down_sh()
-        assert 'iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -p udp --dport 53 -j DNAT --to-destination 127.0.0.1' in out
-        assert 'iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.1' in out
+        assert 'AZ_DNS_IP="$(_installed_escape_dns 10.27.0.0/16)"' in out
+        assert 'iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -p udp --dport 53 -j DNAT --to-destination "$AZ_DNS_IP"' in out
+        assert 'iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -p tcp --dport 53 -j DNAT --to-destination "$AZ_DNS_IP"' in out
+        assert '--to-destination 127.0.0.1' not in out
 
     def test_az_escape_mapping_deletes(self):
         out = agent.render_custom_down_sh()
@@ -193,10 +217,14 @@ class TestRenderCustomDownSh:
         assert 'iptables -w -t nat -D POSTROUTING -s 10.27.0.0/16 -o "$ANTIZAPRET_OUT_INTERFACE" -j SNAT --to-source "$ANTIZAPRET_OUT_IP"' in out
 
     def test_vpn_escape_dns_deletes_conditional(self):
+        """Guarded on VPN_DNS as before, plus on having found an address to
+        delete — an empty one would make iptables -D match the wrong rule."""
         out = agent.render_custom_down_sh()
-        assert 'if [[ "$VPN_DNS" == \'1\' ]]; then' in out
-        assert 'iptables -w -t nat -D PREROUTING -s 10.26.0.0/16 -p udp --dport 53 -j DNAT --to-destination 127.0.0.2' in out
-        assert 'iptables -w -t nat -D PREROUTING -s 10.26.0.0/16 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.2' in out
+        assert 'VPN_DNS_IP="$(_installed_escape_dns 10.26.0.0/16)"' in out
+        assert 'if [[ "$VPN_DNS" == \'1\' && -n "$VPN_DNS_IP" ]]; then' in out
+        assert 'iptables -w -t nat -D PREROUTING -s 10.26.0.0/16 -p udp --dport 53 -j DNAT --to-destination "$VPN_DNS_IP"' in out
+        assert 'iptables -w -t nat -D PREROUTING -s 10.26.0.0/16 -p tcp --dport 53 -j DNAT --to-destination "$VPN_DNS_IP"' in out
+        assert '--to-destination 127.0.0.2' not in out
 
     def test_vpn_escape_postrouting_deletes_both_branches(self):
         out = agent.render_custom_down_sh()

@@ -142,9 +142,28 @@ ANTIZAPRET_OUT_IP="${ANTIZAPRET_OUT_IP:-$DEFAULT_IP}"
 VPN_OUT_INTERFACE="${VPN_OUT_INTERFACE:-$DEFAULT_INTERFACE}"
 VPN_OUT_IP="${VPN_OUT_IP:-$DEFAULT_IP}"
 
+# Resolver address for the escape subnets. It must be mirrored from the rule
+# upstream's own up.sh installed for the matching baseline subnet, never
+# hardcoded: the loopback addresses moved between AntiZapret releases —
+# 127.0.0.1/127.0.0.2 on the release wgfi3 runs, 127.1.1.1/127.2.2.2 on the
+# newer one wgfi4 got — and a constant sent escape DNS to an address where
+# nothing listens. up.sh installs those rules well before it calls this hook
+# as its last action, so they are present here.
+_mirror_dns() {
+    iptables -w -t nat -S PREROUTING 2>/dev/null \\
+    | sed -nE "s|^-A PREROUTING -s $1 -p udp -m udp --dport 53 -j DNAT --to-destination ([0-9.]+)\\$|\\1|p" \\
+    | head -1
+}
+AZ_DNS_IP="$(_mirror_dns 10.29.0.0/16)" || true
+VPN_DNS_IP="$(_mirror_dns 10.28.0.0/16)" || true
+
 # az_escape (10.27) — mirror antizapret (10.29) split-tunnel semantics
-iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -p udp --dport 53 -j DNAT --to-destination 127.0.0.1
-iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.1
+if [[ -n "$AZ_DNS_IP" ]]; then
+    iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -p udp --dport 53 -j DNAT --to-destination "$AZ_DNS_IP"
+    iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -p tcp --dport 53 -j DNAT --to-destination "$AZ_DNS_IP"
+else
+    echo "custom-up: no upstream DNS DNAT for 10.29.0.0/16 — az_escape DNS not redirected" >&2
+fi
 iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 -d "$FAKE_IP.0.0/15" -j ANTIZAPRET-MAPPING
 if [[ "$RESTRICT_FORWARD" == 'y' ]]; then
     iptables -w -t nat -A PREROUTING -s 10.27.0.0/16 ! -d "$FAKE_IP.0.0/15" -j CONNMARK --set-mark 0x1
@@ -157,8 +176,12 @@ else
 fi
 # vpn_escape (10.26) — mirror vpn (10.28) full-VPN semantics
 if [[ "$VPN_DNS" == '1' ]]; then
-    iptables -w -t nat -A PREROUTING -s 10.26.0.0/16 -p udp --dport 53 -j DNAT --to-destination 127.0.0.2
-    iptables -w -t nat -A PREROUTING -s 10.26.0.0/16 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.2
+    if [[ -n "$VPN_DNS_IP" ]]; then
+        iptables -w -t nat -A PREROUTING -s 10.26.0.0/16 -p udp --dport 53 -j DNAT --to-destination "$VPN_DNS_IP"
+        iptables -w -t nat -A PREROUTING -s 10.26.0.0/16 -p tcp --dport 53 -j DNAT --to-destination "$VPN_DNS_IP"
+    else
+        echo "custom-up: no upstream DNS DNAT for 10.28.0.0/16 — vpn_escape DNS not redirected" >&2
+    fi
 fi
 if [[ -z "$VPN_OUT_IP" ]]; then
     iptables -w -t nat -A POSTROUTING -s 10.26.0.0/16 -o "$VPN_OUT_INTERFACE" -j MASQUERADE
@@ -207,9 +230,23 @@ ANTIZAPRET_OUT_IP="${ANTIZAPRET_OUT_IP:-$DEFAULT_IP}"
 VPN_OUT_INTERFACE="${VPN_OUT_INTERFACE:-$DEFAULT_INTERFACE}"
 VPN_OUT_IP="${VPN_OUT_IP:-$DEFAULT_IP}"
 
+# Resolver address of the installed escape rules. Unlike custom-up.sh this
+# cannot mirror the baseline subnets: down.sh deletes its own DNS rules before
+# it calls this hook. Read the address back off the escape rule itself, which
+# upstream never touches.
+_installed_escape_dns() {
+    iptables -w -t nat -S PREROUTING 2>/dev/null \\
+    | sed -nE "s|^-A PREROUTING -s $1 -p udp -m udp --dport 53 -j DNAT --to-destination ([0-9.]+)\\$|\\1|p" \\
+    | head -1
+}
+AZ_DNS_IP="$(_installed_escape_dns 10.27.0.0/16)"
+VPN_DNS_IP="$(_installed_escape_dns 10.26.0.0/16)"
+
 # az_escape (10.27) — mirror antizapret removal
-iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -p udp --dport 53 -j DNAT --to-destination 127.0.0.1
-iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.1
+if [[ -n "$AZ_DNS_IP" ]]; then
+    iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -p udp --dport 53 -j DNAT --to-destination "$AZ_DNS_IP"
+    iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -p tcp --dport 53 -j DNAT --to-destination "$AZ_DNS_IP"
+fi
 iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 -d "$FAKE_IP.0.0/15" -j ANTIZAPRET-MAPPING
 if [[ "$RESTRICT_FORWARD" == 'y' ]]; then
     iptables -w -t nat -D PREROUTING -s 10.27.0.0/16 ! -d "$FAKE_IP.0.0/15" -j CONNMARK --set-mark 0x1
@@ -219,9 +256,9 @@ iptables -w -t nat -D POSTROUTING -s 10.27.0.0/16 -o "$ANTIZAPRET_OUT_INTERFACE"
 iptables -w -t nat -D POSTROUTING -s 10.27.0.0/16 -o "$ANTIZAPRET_OUT_INTERFACE" -j SNAT --to-source "$ANTIZAPRET_OUT_IP"
 
 # vpn_escape (10.26) — mirror vpn removal
-if [[ "$VPN_DNS" == '1' ]]; then
-    iptables -w -t nat -D PREROUTING -s 10.26.0.0/16 -p udp --dport 53 -j DNAT --to-destination 127.0.0.2
-    iptables -w -t nat -D PREROUTING -s 10.26.0.0/16 -p tcp --dport 53 -j DNAT --to-destination 127.0.0.2
+if [[ "$VPN_DNS" == '1' && -n "$VPN_DNS_IP" ]]; then
+    iptables -w -t nat -D PREROUTING -s 10.26.0.0/16 -p udp --dport 53 -j DNAT --to-destination "$VPN_DNS_IP"
+    iptables -w -t nat -D PREROUTING -s 10.26.0.0/16 -p tcp --dport 53 -j DNAT --to-destination "$VPN_DNS_IP"
 fi
 iptables -w -t nat -D POSTROUTING -s 10.26.0.0/16 -o "$VPN_OUT_INTERFACE" -j MASQUERADE
 iptables -w -t nat -D POSTROUTING -s 10.26.0.0/16 -o "$VPN_OUT_INTERFACE" -j SNAT --to-source "$VPN_OUT_IP"
