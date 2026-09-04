@@ -307,6 +307,16 @@ def render_server_conf(
             lines.append(f"I1 = {awg_params['i1']}")
 
     for peer in peers:
+        # A peer with no AllowedIPs handshakes and routes nothing: the client
+        # shows "connected" and no traffic moves, and neither wg nor the
+        # dashboard reports anything wrong. Three clients sat like that on both
+        # nodes for five months (CorpAdmin-AZ-okr). This is the one place every
+        # server conf is written through, so refuse here rather than emit it.
+        if not peer.allowed_ips or not peer.allowed_ips.strip():
+            raise ValueError(
+                f"peer {peer.name!r} on {iface} has no AllowedIPs — refusing to "
+                f"render a peer that would connect but route nothing"
+            )
         lines.append("")
         lines.append(f"# Client = {peer.name}")
         lines.append("[Peer]")

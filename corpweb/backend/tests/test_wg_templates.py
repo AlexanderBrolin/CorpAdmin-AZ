@@ -298,6 +298,51 @@ class TestRenderServerConf:
 # render_client_conf
 # ---------------------------------------------------------------------------
 
+class TestRenderServerConfRejectsAddresslessPeers:
+    """
+    A peer with no AllowedIPs completes a handshake and routes nothing.
+
+    Three named clients sat in exactly that state on both nodes from April to
+    September 2026 (CorpAdmin-AZ-okr) — they showed "connected" and had no
+    traffic, and nothing anywhere complained. render_server_conf is the single
+    choke point every server conf is written through, so the invariant belongs
+    here: refuse to emit such a peer instead of writing it out silently.
+    """
+
+    def _peers(self, allowed_ips):
+        return [Peer(name="broken", public_key="k", preshared_key="p",
+                     allowed_ips=allowed_ips)]
+
+    def test_empty_allowed_ips_raises(self):
+        with pytest.raises(ValueError, match="AllowedIPs"):
+            render_server_conf(
+                iface="antizapret", peers=self._peers(""),
+                server_privkey="sk", address="10.29.8.1/21",
+            )
+
+    def test_whitespace_allowed_ips_raises(self):
+        with pytest.raises(ValueError, match="AllowedIPs"):
+            render_server_conf(
+                iface="antizapret", peers=self._peers("   "),
+                server_privkey="sk", address="10.29.8.1/21",
+            )
+
+    def test_error_names_the_peer(self):
+        """The operator must learn which client is affected, not just that one is."""
+        with pytest.raises(ValueError, match="broken"):
+            render_server_conf(
+                iface="antizapret", peers=self._peers(""),
+                server_privkey="sk", address="10.29.8.1/21",
+            )
+
+    def test_valid_peer_still_renders(self):
+        out = render_server_conf(
+            iface="antizapret", peers=self._peers("10.29.8.2/32"),
+            server_privkey="sk", address="10.29.8.1/21",
+        )
+        assert "AllowedIPs = 10.29.8.2/32" in out
+
+
 class TestRenderClientConf:
     _PEER = Peer(
         name="alice-1",
