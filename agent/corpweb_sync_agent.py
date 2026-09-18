@@ -1217,24 +1217,54 @@ def _active_peers(iface: str) -> int:
 
 _prev_net: dict = {"rx": 0, "tx": 0, "ts": 0.0}
 
+_PROC_ROUTE = "/proc/net/route"
+_PROC_NET_DEV = "/proc/net/dev"
+
+
+def _uplink_iface() -> str | None:
+    """Return the interface carrying the default route.
+
+    Hosters name the uplink differently — eth0, ens3, net0 — so matching by name
+    silently drops throughput metrics on any node named otherwise. wgfi5 (net0)
+    reported a flat zero for exactly that reason (CorpAdmin-AZ-zcq).
+    """
+    try:
+        with open(_PROC_ROUTE) as f:
+            next(f, None)  # header
+            for line in f:
+                parts = line.split()
+                # destination 0.0.0.0 == default route
+                if len(parts) > 2 and parts[1] == "00000000":
+                    return parts[0]
+    except OSError:
+        return None
+    return None
+
 
 def collect_metrics() -> dict:
     global _prev_net
     metrics = {f"active_peers_{iface}": _active_peers(iface) for iface in _IFACES}
+    uplink = _uplink_iface()
+    if not uplink:
+        return metrics
     try:
-        with open("/proc/net/dev") as f:
+        with open(_PROC_NET_DEV) as f:
             for line in f:
-                parts = line.split()
-                if len(parts) >= 10 and any(x in parts[0] for x in ("eth0", "ens")):
-                    rx, tx = int(parts[1]), int(parts[9])
-                    now = time.monotonic()
-                    if _prev_net["ts"] > 0:
-                        dt = max(now - _prev_net["ts"], 1)
-                        metrics["rx_bytes_per_sec"] = int((rx - _prev_net["rx"]) / dt)
-                        metrics["tx_bytes_per_sec"] = int((tx - _prev_net["tx"]) / dt)
-                    _prev_net = {"rx": rx, "tx": tx, "ts": now}
+                name, sep, rest = line.partition(":")
+                if not sep or name.strip() != uplink:
+                    continue
+                counters = rest.split()
+                if len(counters) < 9:
                     break
-    except Exception:
+                rx, tx = int(counters[0]), int(counters[8])
+                now = time.monotonic()
+                if _prev_net["ts"] > 0:
+                    dt = max(now - _prev_net["ts"], 1)
+                    metrics["rx_bytes_per_sec"] = int((rx - _prev_net["rx"]) / dt)
+                    metrics["tx_bytes_per_sec"] = int((tx - _prev_net["tx"]) / dt)
+                _prev_net = {"rx": rx, "tx": tx, "ts": now}
+                break
+    except OSError:
         pass
     return metrics
 
